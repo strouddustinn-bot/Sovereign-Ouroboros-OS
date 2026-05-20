@@ -1,0 +1,13 @@
+{
+  "project_name": "Project Ouroboros",
+  "version": "1.0.0-Sovereign",
+  "author": "Hermes & Dustinn",
+  "layers": [
+    "NeuroSynth",
+    "ChronoWeave",
+    "MetaMorph",
+    "HiveMind",
+    "EthosCompiler"
+  ],
+  "core_thesis": "Recursive intelligence via the integration of latent imagination, temporal simulation, and autonomous structural evolution."
+}
