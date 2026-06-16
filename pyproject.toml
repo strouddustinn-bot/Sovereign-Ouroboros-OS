@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sovereign-ouroboros-os"
+name = "ouroboros"
 version = "0.1.0"
 description = "A Recursive Intelligence Framework for Autonomous Evolution"
 readme = "README.md"
@@ -22,10 +22,10 @@ dev  = ["pytest>=8.0", "pytest-cov", "numpy>=1.26", "fastapi>=0.111",
         "uvicorn[standard]>=0.29", "httpx>=0.27"]
 
 [project.scripts]
-ouroboros = "sovereign_ouroboros_os.__main__:main"
+ouroboros = "ouroboros.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["sovereign_ouroboros_os*"]
+include = ["ouroboros*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

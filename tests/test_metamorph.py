@@ -1,7 +1,7 @@
 """Tests for the MetaMorph self-modifying execution engine."""
 
-from sovereign_ouroboros_os.core import ProposedAction
-from sovereign_ouroboros_os.metamorph import MetaMorph
+from ouroboros.core import ProposedAction
+from ouroboros.metamorph import MetaMorph
 
 
 def test_builtin_skill_handles_matching_intent():
@@ -72,7 +72,7 @@ def test_second_call_reuses_synthesized_skill():
 
 
 def test_synthesis_does_not_leak_into_module_globals():
-    import sovereign_ouroboros_os.metamorph.evolution as evolution
+    import ouroboros.metamorph.evolution as evolution
 
     engine = MetaMorph()
     skill = engine.synthesize_skill("leaky sentinel intent")
@@ -96,7 +96,7 @@ def test_validate_skill_accepts_well_formed_skill():
 
 
 def test_validate_skill_rejects_non_dict_output():
-    from sovereign_ouroboros_os.core import Skill
+    from ouroboros.core import Skill
 
     engine = MetaMorph()
     bad = Skill(name="bad", fn=lambda intent, params: "not a dict")
@@ -104,6 +104,6 @@ def test_validate_skill_rejects_non_dict_output():
 
 
 def test_engine_satisfies_evolver_protocol():
-    from sovereign_ouroboros_os.core import Evolver
+    from ouroboros.core import Evolver
 
     assert isinstance(MetaMorph(), Evolver)

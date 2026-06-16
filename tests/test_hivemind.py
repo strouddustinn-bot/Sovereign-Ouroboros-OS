@@ -1,8 +1,8 @@
 """Tests for the HiveMind federated-intelligence layer."""
 
-from sovereign_ouroboros_os.core.contracts import Expander
-from sovereign_ouroboros_os.core.types import FederatedResult
-from sovereign_ouroboros_os.hivemind import HiveMind
+from ouroboros.core.contracts import Expander
+from ouroboros.core.types import FederatedResult
+from ouroboros.hivemind import HiveMind
 
 
 def test_satisfies_expander_protocol():

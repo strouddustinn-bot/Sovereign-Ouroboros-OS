@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pytest
 
-from sovereign_ouroboros_os.knowledge.ingestion import Chunker, Embedder, IngestPipeline
-from sovereign_ouroboros_os.knowledge.schemas import EMBEDDING_DIM, EMBEDDING_MODEL
-from sovereign_ouroboros_os.knowledge.storage.sqlite_store import SQLiteKBStore
+from ouroboros.knowledge.ingestion import Chunker, Embedder, IngestPipeline
+from ouroboros.knowledge.schemas import EMBEDDING_DIM, EMBEDDING_MODEL
+from ouroboros.knowledge.storage.sqlite_store import SQLiteKBStore
 
 # ---------------------------------------------------------------------------
 # Fixtures

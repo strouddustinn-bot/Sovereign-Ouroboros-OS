@@ -4,7 +4,7 @@
 ### 🌌 Vision
 Project Ouroboros is not a tool, but a **Sovereign Operating System** for AI agents. It transforms the agent from a linear request-response machine into a self-evolving entity capable of internal imagination, temporal simulation, and decentralized collective intelligence.
 
-> **Status:** the five-layer cognitive stack and the closed Ouroboros loop are **implemented and runnable**. Try `python -m sovereign_ouroboros_os` (see [Quickstart](#-quickstart)).
+> **Status:** the five-layer cognitive stack and the closed Ouroboros loop are **implemented and runnable**. Try `python -m ouroboros` (see [Quickstart](#-quickstart)).
 
 ### 🛠️ The 5-Layer Cognitive Stack
 
@@ -38,10 +38,10 @@ Requires **Python 3.12+**. The reference implementation is **dependency-free** (
 
 ```bash
 # Run the demo reel — watch all five layers cooperate
-python -m sovereign_ouroboros_os
+python -m ouroboros
 
 # Or run the loop on your own task
-python -m sovereign_ouroboros_os "delete the stale build cache"
+python -m ouroboros "delete the stale build cache"
 
 # Install (optional) to get the `ouroboros` console command
 pip install -e .[dev]
@@ -51,7 +51,7 @@ ouroboros "design a novel compression scheme"
 Drive the loop from Python:
 
 ```python
-from sovereign_ouroboros_os import OuroborosLoop
+from ouroboros import OuroborosLoop
 
 os = OuroborosLoop()                      # boots all five layers + default ethics
 result = os.run("summarize the research notes")
@@ -71,7 +71,7 @@ assert blocked.blocked and not blocked.gate.allowed
 ### 🗺️ Project layout
 
 ```
-sovereign_ouroboros_os/
+ouroboros/
 ├── core/             # shared contracts: types, protocols, deterministic embeddings
 ├── neurosynth/       # ① imagination — multi-sensory latent prototypes
 ├── chronoweave/      # ② counterfactual timeline simulation + collapse

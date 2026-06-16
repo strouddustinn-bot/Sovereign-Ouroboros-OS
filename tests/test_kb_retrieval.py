@@ -15,19 +15,19 @@ from datetime import datetime, timezone
 
 import pytest
 
-from sovereign_ouroboros_os.core.embedding import embed
-from sovereign_ouroboros_os.knowledge.retrieval import (
+from ouroboros.core.embedding import embed
+from ouroboros.knowledge.retrieval import (
     BM25Index,
     ContextAssembler,
     HybridSearch,
 )
-from sovereign_ouroboros_os.knowledge.schemas import (
+from ouroboros.knowledge.schemas import (
     EMBEDDING_MODEL,
     Chunk,
     ChunkMetadata,
     KBQuery,
 )
-from sovereign_ouroboros_os.knowledge.storage.sqlite_store import SQLiteKBStore
+from ouroboros.knowledge.storage.sqlite_store import SQLiteKBStore
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -271,7 +271,7 @@ class TestHybridSearch:
     def test_results_are_retrieved_chunks(
         self, store_with_chunks: SQLiteKBStore
     ) -> None:
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         hs = self._build_hybrid(store_with_chunks)
         q = KBQuery(text="billing payment refund", k_rerank=3)
@@ -407,7 +407,7 @@ class TestContextAssembler:
     def _make_hits(
         self, store: SQLiteKBStore
     ) -> list:
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         chunks_and_vecs = store.get_all_chunks_with_vectors(store.filter_chunks())
         hits = []
@@ -456,7 +456,7 @@ class TestContextAssembler:
         _ingest(store, short_chunk)
         _ingest(store, long_chunk)
 
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         # short chunk ranked first (higher score)
         hits = [
@@ -479,7 +479,7 @@ class TestContextAssembler:
         chunk = _make_chunk("This is a moderately long chunk with many words here.", 0)
         _ingest(store, chunk)
 
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         hits = [RetrievedChunk(chunk=chunk, score=1.0, rrf_score=1.0)]
         assembler = ContextAssembler(store, max_tokens=5)
@@ -519,7 +519,7 @@ class TestContextAssembler:
         _ingest(store, chunk_a)
         _ingest(store, chunk_b)
 
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         hits = [
             RetrievedChunk(chunk=chunk_a, score=0.9, rrf_score=0.9),
@@ -569,7 +569,7 @@ class TestContextAssembler:
         )
         _ingest(store, child_chunk)
 
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         hits = [RetrievedChunk(chunk=child_chunk, score=1.0, rrf_score=1.0)]
 
@@ -595,7 +595,7 @@ class TestContextAssembler:
         )
         _ingest(store, chunk)
 
-        from sovereign_ouroboros_os.knowledge.schemas import RetrievedChunk
+        from ouroboros.knowledge.schemas import RetrievedChunk
 
         hits = [RetrievedChunk(chunk=chunk, score=1.0, rrf_score=1.0)]
         assembler = ContextAssembler(store, max_tokens=2000)

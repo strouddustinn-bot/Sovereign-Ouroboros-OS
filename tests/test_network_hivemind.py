@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-from sovereign_ouroboros_os.core.types import FederatedResult
-from sovereign_ouroboros_os.hivemind import NetworkHiveMind
-from sovereign_ouroboros_os.hivemind.federation import HiveMind
+from ouroboros.core.types import FederatedResult
+from ouroboros.hivemind import NetworkHiveMind
+from ouroboros.hivemind.federation import HiveMind
 
 
 # ---------------------------------------------------------------------------

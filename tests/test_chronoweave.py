@@ -1,7 +1,7 @@
 """Tests for the ChronoWeave counterfactual timeline engine."""
 
-from sovereign_ouroboros_os.chronoweave import ChronoWeave
-from sovereign_ouroboros_os.core import (
+from ouroboros.chronoweave import ChronoWeave
+from ouroboros.core import (
     Prototype,
     Simulator,
     Timeline,

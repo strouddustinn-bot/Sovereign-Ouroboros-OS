@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from sovereign_ouroboros_os.core.types import ExecutionResult, Skill
-from sovereign_ouroboros_os.memory import AgentMemory
+from ouroboros.core.types import ExecutionResult, Skill
+from ouroboros.memory import AgentMemory
 
 
 # ---------------------------------------------------------------------------
@@ -30,15 +30,15 @@ def _make_loop_result(
     We use a plain namespace object so the memory tests remain independent of
     the full loop machinery.
     """
-    from sovereign_ouroboros_os.core.types import (
+    from ouroboros.core.types import (
         ExecutionResult,
         ProposedAction,
         Timeline,
     )
-    from sovereign_ouroboros_os.ethos_compiler import GateResult
+    from ouroboros.ethos_compiler import GateResult
 
     # The real LoopResult is a dataclass; we instantiate it directly.
-    from sovereign_ouroboros_os.ouroboros_loop import LoopResult
+    from ouroboros.ouroboros_loop import LoopResult
 
     execution: ExecutionResult | None = None
     if succeeded:
@@ -215,7 +215,7 @@ def test_save_multiple_skills() -> None:
 
 def test_ouroboros_loop_saves_to_memory() -> None:
     """OuroborosLoop.run() persists the result when memory= is provided."""
-    from sovereign_ouroboros_os import OuroborosLoop
+    from ouroboros import OuroborosLoop
 
     with AgentMemory(":memory:") as mem:
         loop = OuroborosLoop(memory=mem)
@@ -227,7 +227,7 @@ def test_ouroboros_loop_saves_to_memory() -> None:
 
 def test_ouroboros_loop_without_memory_is_unchanged() -> None:
     """OuroborosLoop works exactly as before when memory is not provided."""
-    from sovereign_ouroboros_os import OuroborosLoop
+    from ouroboros import OuroborosLoop
 
     loop = OuroborosLoop()
     result = loop.run("summarize the quarterly report")

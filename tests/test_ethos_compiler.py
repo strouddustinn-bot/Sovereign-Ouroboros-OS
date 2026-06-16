@@ -1,7 +1,7 @@
 """Tests for the EthosCompiler executable-ethics layer."""
 
-from sovereign_ouroboros_os import OuroborosLoop
-from sovereign_ouroboros_os.ethos_compiler import EthosCompiler
+from ouroboros import OuroborosLoop
+from ouroboros.ethos_compiler import EthosCompiler
 
 
 def test_compile_produces_named_principle():

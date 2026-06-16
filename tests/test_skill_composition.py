@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from sovereign_ouroboros_os.core.types import ExecutionResult, ProposedAction, Skill
-from sovereign_ouroboros_os.metamorph import MetaMorph
+from ouroboros.core.types import ExecutionResult, ProposedAction, Skill
+from ouroboros.metamorph import MetaMorph
 
 
 # ---------------------------------------------------------------------------

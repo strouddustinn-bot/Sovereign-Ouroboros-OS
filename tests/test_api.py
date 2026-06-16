@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from sovereign_ouroboros_os.api.app import app, _loop
-from sovereign_ouroboros_os.ouroboros_loop import DEFAULT_PRINCIPLES
+from ouroboros.api.app import app, _loop
+from ouroboros.ouroboros_loop import DEFAULT_PRINCIPLES
 
 client = TestClient(app)
 

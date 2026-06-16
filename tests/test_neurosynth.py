@@ -1,8 +1,8 @@
 """Tests for the NeuroSynth cross-modal embodied imagination layer."""
 
-from sovereign_ouroboros_os.core.contracts import Imaginer
-from sovereign_ouroboros_os.core.types import Prototype
-from sovereign_ouroboros_os.neurosynth import NeuroSynth
+from ouroboros.core.contracts import Imaginer
+from ouroboros.core.types import Prototype
+from ouroboros.neurosynth import NeuroSynth
 
 _MODALITIES = {"semantic", "visual", "spatial", "auditory"}
 _TASK = "plan a resilient backup routine"

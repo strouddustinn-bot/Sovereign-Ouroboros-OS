@@ -1,7 +1,7 @@
 """End-to-end tests for the integrated Ouroboros loop."""
 
-from sovereign_ouroboros_os import OuroborosLoop
-from sovereign_ouroboros_os.ouroboros_loop import DEFAULT_PRINCIPLES
+from ouroboros import OuroborosLoop
+from ouroboros.ouroboros_loop import DEFAULT_PRINCIPLES
 
 
 def test_full_loop_runs_end_to_end():
