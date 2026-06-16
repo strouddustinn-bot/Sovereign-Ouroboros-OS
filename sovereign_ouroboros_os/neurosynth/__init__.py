@@ -1,6 +1,11 @@
-"""NeuroSynth – Cross-Modal Embodied Imagination layer."""
+"""NeuroSynth – Cross-Modal Embodied Imagination layer (the Mind's Eye).
 
-# TODO: implement NeuroSynth latent buffer and multi-sensory mental model builder.
-#       The buffer should accept text, image embeddings, and audio spectrograms,
-#       fuse them into a unified latent vector, and expose a `prototype(task)` API
-#       that returns candidate solution embeddings before any real I/O is performed.
+Builds internal multi-sensory mental models in a latent buffer, fusing
+semantic, visual, spatial, and auditory representations into unified latent
+vectors, and proposes candidate solution prototypes before any real I/O is
+performed.
+"""
+
+from sovereign_ouroboros_os.neurosynth.imagination import NeuroSynth
+
+__all__ = ["NeuroSynth"]

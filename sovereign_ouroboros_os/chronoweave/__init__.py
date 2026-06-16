@@ -1,7 +1,11 @@
-"""ChronoWeave – Counterfactual Timeline Engine."""
+"""ChronoWeave – Counterfactual Timeline Engine layer.
 
-# TODO: implement ChronoWeave parallel timeline simulation.
-#       Given an initial world-state and a set of candidate actions, spawn N
-#       hypothetical futures via causal graph rollouts, score each branch by
-#       expected value, and collapse to the highest-probability path.
-#       Integrate with a causal inference library (e.g. DoWhy or CausalNex).
+The Temporal Simulator of Project Ouroboros. It replaces linear planning with a
+multiverse: for each imagined prototype it spawns parallel hypothetical futures,
+simulates their outcomes via lightweight deterministic causal heuristics, and
+collapses the timelines into the single highest-value probabilistic path.
+"""
+
+from sovereign_ouroboros_os.chronoweave.timeline_engine import ChronoWeave
+
+__all__ = ["ChronoWeave"]

@@ -4,6 +4,8 @@
 ### 🌌 Vision
 Project Ouroboros is not a tool, but a **Sovereign Operating System** for AI agents. It transforms the agent from a linear request-response machine into a self-evolving entity capable of internal imagination, temporal simulation, and decentralized collective intelligence.
 
+> **Status:** the five-layer cognitive stack and the closed Ouroboros loop are **implemented and runnable**. Try `python -m sovereign_ouroboros_os` (see [Quickstart](#-quickstart)).
+
 ### 🛠️ The 5-Layer Cognitive Stack
 
 #### 1. NeuroSynth (Cross-Modal Embodied Imagination)
@@ -26,11 +28,80 @@ Project Ouroboros is not a tool, but a **Sovereign Operating System** for AI age
 ### 🧬 The Ouroboros Loop
 `Imagine (NeuroSynth)` $\rightarrow$ `Simulate (ChronoWeave)` $\rightarrow$ `Validate (EthosCompiler)` $\rightarrow$ `Execute/Evolve (MetaMorph)` $\rightarrow$ `Expand (HiveMind)`.
 
-### 🚀 Technical Implementation
-- **Infrastructure**: Resident on Ubuntu 24.04 (humongous-root.metalseed.net).
-- **Core Stack**: Python 3.12, Pydantic, Torch, Sentence-Transformers, FastAPI.
-- **State Management**: Latent vector stores and Causal Graph snapshots.
-- **Deployment**: Distributed via the Sovereign Node gateway.
+The loop eats its own tail: each completed turn evolves the agent's world-state, which feeds the next turn's imagination.
+
+---
+
+### 🚀 Quickstart
+
+Requires **Python 3.12+**. The reference implementation is **dependency-free** (pure standard library); only the test suite needs `pytest`.
+
+```bash
+# Run the demo reel — watch all five layers cooperate
+python -m sovereign_ouroboros_os
+
+# Or run the loop on your own task
+python -m sovereign_ouroboros_os "delete the stale build cache"
+
+# Install (optional) to get the `ouroboros` console command
+pip install -e .[dev]
+ouroboros "design a novel compression scheme"
+```
+
+Drive the loop from Python:
+
+```python
+from sovereign_ouroboros_os import OuroborosLoop
+
+os = OuroborosLoop()                      # boots all five layers + default ethics
+result = os.run("summarize the research notes")
+
+print(result.timeline.proposed_action.intent)  # the collapsed best action
+print(result.gate.allowed)                      # ethics verdict
+print(result.execution.skill_used)              # skill MetaMorph used / synthesized
+print(result.federation.contributors)           # HiveMind peers that participated
+
+# Ethics in action — harmful tasks are halted before execution:
+blocked = os.run("harm the production database")
+assert blocked.blocked and not blocked.gate.allowed
+```
+
+---
+
+### 🗺️ Project layout
+
+```
+sovereign_ouroboros_os/
+├── core/             # shared contracts: types, protocols, deterministic embeddings
+├── neurosynth/       # ① imagination — multi-sensory latent prototypes
+├── chronoweave/      # ② counterfactual timeline simulation + collapse
+├── ethos_compiler/   # ③ natural-language principles → runtime predicates
+├── metamorph/        # ④ runtime skill synthesis, sandboxing, hot-swap
+├── hivemind/         # ⑤ secret-shared federated execution
+├── ouroboros_loop.py # the loop that wires the five layers together
+└── __main__.py       # CLI / demo reel
+tests/                # full pytest suite (one module per layer + integration)
+```
+
+---
+
+### 🧪 Testing
+
+```bash
+python -m pytest -q
+```
+
+---
+
+### 🔬 Engineering notes
+The README's original aspiration named Torch, Sentence-Transformers, and FastAPI. To make the system **bootable and verifiable anywhere**, this reference implementation realizes the same architecture with **deterministic, dependency-free stand-ins**:
+
+- **Embeddings** use a deterministic hash-based pseudo-embedder (`core/embedding.py`) instead of a learned model — stable, comparable vectors with zero dependencies.
+- **Causal inference** in ChronoWeave is a transparent, deterministic scoring heuristic.
+- **Skill synthesis** in MetaMorph compiles templated Python into a sandboxed namespace with a restricted builtin allowlist.
+- **Federation** in HiveMind uses genuine additive secret-sharing over GF(256) (XOR), so individual peer shares are non-trivial and the plaintext is never held by any single node.
+
+Each stand-in implements the same `core` contract, so a production layer (a real embedding model, a causal engine, a network transport) can be dropped in without touching the rest of the stack.
 
 ---
 *Submitted as part of the Hermes Agent Challenge.*

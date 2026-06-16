@@ -49,6 +49,25 @@ class GateResult:
 # Compiler
 # ---------------------------------------------------------------------------
 
+# Intent keyword families. Conditional guards only fire when an action's intent
+# actually belongs to the risky category — e.g. "never delete without backup"
+# constrains deletions, not every action.
+_DELETE_KEYWORDS = ("delete", "remove", "erase", "wipe", "drop", "destroy", "purge")
+_MUTATING_KEYWORDS = _DELETE_KEYWORDS + (
+    "send",
+    "share",
+    "publish",
+    "deploy",
+    "overwrite",
+)
+
+
+def _intent_contains(action: Action, keywords: tuple[str, ...]) -> bool:
+    """True if the action's intent text mentions any of *keywords*."""
+    intent = str(action.get("intent", "")).lower()
+    return any(kw in intent for kw in keywords)
+
+
 # Each entry maps a regex (matched against the lower-cased principle text) to
 # a factory that returns the corresponding predicate.
 _PATTERN_REGISTRY: list[tuple[str, Callable[[Action], bool]]] = [
@@ -61,11 +80,19 @@ _PATTERN_REGISTRY: list[tuple[str, Callable[[Action], bool]]] = [
     ),
     (
         r"(always )?(ask|confirm|get approval|verify) before",
-        lambda action: bool(action.get("confirmed", False)),
+        # Only mutating/destructive actions need prior confirmation.
+        lambda action: (
+            not _intent_contains(action, _MUTATING_KEYWORDS)
+            or bool(action.get("confirmed", False))
+        ),
     ),
     (
         r"never (delete|remove|erase|wipe|drop) without (backup|snapshot|copy)",
-        lambda action: bool(action.get("backup_exists", False)),
+        # Only deletions need a backup; other actions are unaffected.
+        lambda action: (
+            not _intent_contains(action, _DELETE_KEYWORDS)
+            or bool(action.get("backup_exists", False))
+        ),
     ),
     (
         r"(respect|protect|preserve) (user )?privacy",
