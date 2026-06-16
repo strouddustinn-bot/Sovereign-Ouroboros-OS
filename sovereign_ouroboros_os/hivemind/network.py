@@ -26,23 +26,43 @@ Response body::
 
 Usage
 -----
-::
+**Async context manager** (preferred)::
 
     async with NetworkHiveMind(n_peers=3) as hive:
         result = await hive.expand("plan the mission", seed=42)
 
-Or synchronously (auto-manages the event loop)::
+**Synchronous** — auto-manages the event loop per call::
 
     hive = NetworkHiveMind(n_peers=5)
     result = hive.expand_sync("plan the mission", seed=42)
+
+**Sync context manager** — servers persist across multiple calls
+(uses a background event-loop thread so all asyncio objects share
+one long-lived loop)::
+
+    with NetworkHiveMind(n_peers=3) as hive:
+        r1 = hive.expand_sync("task one")
+        r2 = hive.expand_sync("task two")
+
+Event-loop contract
+-------------------
+asyncio ``Server`` objects are bound to the event loop that created them;
+they cannot be awaited or connected-to from a different loop.  To satisfy
+the synchronous context-manager contract without tying the caller to any
+particular thread, ``NetworkHiveMind`` spins up a *dedicated background
+thread* that owns a persistent event loop for the lifetime of the ``with``
+block.  Coroutines scheduled from the calling thread via
+``asyncio.run_coroutine_threadsafe`` share that loop safely.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import struct
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -139,9 +159,16 @@ class NetworkHiveMind:
         result = await hive.expand("solve this")
         await hive.stop()
 
-    **Synchronous** (auto-manages event loop per call)::
+    **Synchronous — auto event loop per call** (no pre-start needed)::
 
         result = NetworkHiveMind().expand_sync("solve this")
+
+    **Synchronous context manager** (re-uses one background loop thread
+    so multiple ``expand_sync`` calls share the same peer servers)::
+
+        with NetworkHiveMind(n_peers=3) as hive:
+            r1 = hive.expand_sync("task one")
+            r2 = hive.expand_sync("task two")
 
     Attributes:
         n_peers:  Number of peer servers to spin up.  Defaults to 5.
@@ -159,6 +186,14 @@ class NetworkHiveMind:
     )
     _peer_ids: list[str] = field(init=False, repr=False, default_factory=list)
 
+    # Background-thread event loop used by the sync context manager.
+    _loop: asyncio.AbstractEventLoop | None = field(
+        init=False, repr=False, default=None
+    )
+    _loop_thread: threading.Thread | None = field(
+        init=False, repr=False, default=None
+    )
+
     def __post_init__(self) -> None:
         if self.n_peers < 1:
             raise ValueError("NetworkHiveMind requires at least one peer")
@@ -166,6 +201,8 @@ class NetworkHiveMind:
         self._servers = []
         self._peer_addresses = []
         self._peer_ids = [f"peer-{i}" for i in range(self.n_peers)]
+        self._loop = None
+        self._loop_thread = None
 
     # ------------------------------------------------------------------
     # Async lifecycle
@@ -191,7 +228,6 @@ class NetworkHiveMind:
             host, port = bound_socket.getsockname()[:2]
             self._peer_addresses.append((host, port))
             self._servers.append(server)
-            server.start_serving if hasattr(server, "start_serving") else None
 
     async def stop(self) -> None:
         """Shut down all peer TCP servers gracefully."""
@@ -217,12 +253,49 @@ class NetworkHiveMind:
     # ------------------------------------------------------------------
 
     def __enter__(self) -> "NetworkHiveMind":
-        """Start servers in a new (temporary) event loop for sync usage."""
-        asyncio.run(self.start())
+        """Start a dedicated background event-loop thread and peer servers.
+
+        A background thread is launched that owns a persistent asyncio event
+        loop.  The peer TCP servers are started on that loop, and the same
+        loop is used for subsequent :meth:`expand_sync` calls inside the
+        ``with`` block, ensuring all asyncio objects (servers, connections)
+        share one loop.
+        """
+        ready = threading.Event()
+        loop_holder: list[asyncio.AbstractEventLoop] = []
+
+        def _run_loop() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_holder.append(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_run_loop, daemon=True)
+        thread.start()
+        ready.wait()
+
+        self._loop = loop_holder[0]
+        self._loop_thread = thread
+
+        # Start servers on the background loop.
+        future = asyncio.run_coroutine_threadsafe(self.start(), self._loop)
+        future.result()  # wait for start to complete
+
         return self
 
     def __exit__(self, *_: object) -> None:
-        asyncio.run(self.stop())
+        """Shut down peer servers and the background event-loop thread."""
+        if self._loop is not None:
+            future = asyncio.run_coroutine_threadsafe(self.stop(), self._loop)
+            future.result()
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=5)
+
+        self._loop = None
+        self._loop_thread = None
 
     # ------------------------------------------------------------------
     # Core API
@@ -283,12 +356,13 @@ class NetworkHiveMind:
         """Synchronous wrapper around :meth:`expand`.
 
         Suitable for callers (such as the OuroborosLoop) that run in a purely
-        synchronous context.  Manages its own ``asyncio`` event loop: if the
-        servers have not been started yet they are auto-started and
-        auto-stopped within the single ``asyncio.run()`` invocation.
+        synchronous context.
 
-        If the servers are already running (e.g. the caller used the context
-        manager), a temporary loop is used only for the ``expand`` coroutine.
+        * **No pre-started servers** — ``asyncio.run()`` is used: starts
+          servers, runs expand, stops servers, all in one ephemeral loop.
+        * **Pre-started servers** (sync ``with`` block) — the coroutine is
+          submitted to the background event-loop thread that owns the servers,
+          so the same asyncio loop is used throughout.
 
         Args:
             task:  The plaintext task to distribute.
@@ -297,7 +371,15 @@ class NetworkHiveMind:
         Returns:
             A :class:`~sovereign_ouroboros_os.core.types.FederatedResult`.
         """
-        return asyncio.run(self.expand(task, seed))
+        if self._loop is not None:
+            # Servers live on a background loop — schedule there.
+            future = asyncio.run_coroutine_threadsafe(
+                self.expand(task, seed), self._loop
+            )
+            return future.result()
+        else:
+            # No persistent loop — create an ephemeral one per call.
+            return asyncio.run(self.expand(task, seed))
 
     # ------------------------------------------------------------------
     # Internal helpers
