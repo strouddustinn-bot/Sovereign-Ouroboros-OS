@@ -1,0 +1,4 @@
+{"query": "how do refunds work", "relevant_source_uris": ["kb://billing-policy"], "filters": {"domain": "billing"}}
+{"query": "what is the agent ethical constraint system", "relevant_source_uris": ["kb://ouroboros-docs"], "filters": {"domain": "system"}}
+{"query": "how does secret sharing work in hivemind", "relevant_source_uris": ["kb://ouroboros-docs"], "filters": {"domain": "system"}}
+{"query": "counterfactual timeline simulation", "relevant_source_uris": ["kb://ouroboros-docs"], "filters": {"domain": "system"}}
