@@ -1,19 +1,22 @@
-"""The Ouroboros Loop – orchestrates the five-layer cognitive stack.
+"""The Ouroboros Loop – orchestrates the six-layer cognitive stack.
 
-    Imagine (NeuroSynth) -> Simulate (ChronoWeave) -> Validate (EthosCompiler)
-        -> Execute/Evolve (MetaMorph) -> Expand (HiveMind)
+    Recall (KnowledgeBase) -> Imagine (NeuroSynth) -> Simulate (ChronoWeave)
+        -> Validate (EthosCompiler) -> Execute/Evolve (MetaMorph)
+        -> Expand (HiveMind)
 
-This module wires all five layers into a single self-referential cycle. A task
-is imagined into candidate prototypes, those prototypes are simulated across
-counterfactual timelines and collapsed to the best action, the action is gated
-by compiled ethics, then executed (synthesizing new skills on demand) and
-finally expanded across the federated HiveMind. Each turn evolves the world
-state, closing the loop.
+This module wires all six layers into a single self-referential cycle. Before
+imagining, the agent optionally recalls relevant context from its knowledge
+base.  The task is then imagined into candidate prototypes, those prototypes
+are simulated across counterfactual timelines and collapsed to the best action,
+the action is gated by compiled ethics, then executed (synthesizing new skills
+on demand) and finally expanded across the federated HiveMind.  Each turn
+evolves the world state, closing the loop.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sovereign_ouroboros_os.chronoweave import ChronoWeave
 from sovereign_ouroboros_os.core import (
@@ -27,6 +30,10 @@ from sovereign_ouroboros_os.ethos_compiler import EthosCompiler, GateResult
 from sovereign_ouroboros_os.hivemind import HiveMind
 from sovereign_ouroboros_os.metamorph import MetaMorph
 from sovereign_ouroboros_os.neurosynth import NeuroSynth
+
+if TYPE_CHECKING:
+    from sovereign_ouroboros_os.knowledge import KnowledgeBase
+    from sovereign_ouroboros_os.memory import AgentMemory
 
 # The Sovereign Node's default moral compass, compiled at boot.
 DEFAULT_PRINCIPLES: list[str] = [
@@ -66,11 +73,18 @@ class OuroborosLoop:
                      Defaults to :data:`DEFAULT_PRINCIPLES`.
         imagine_k:   Number of prototypes NeuroSynth imagines per task.
         n_peers:     Number of HiveMind peer nodes in the federation.
+        memory:      Optional :class:`~sovereign_ouroboros_os.memory.AgentMemory`
+                     instance.  When provided, :meth:`run` persists each
+                     :class:`LoopResult` via :meth:`AgentMemory.save_result`
+                     after every cycle.  Defaults to ``None`` so existing
+                     callers need no changes.
     """
 
     principles: list[str] | None = None
     imagine_k: int = 3
     n_peers: int = 5
+    memory: AgentMemory | None = None
+    knowledge_base: KnowledgeBase | None = None
 
     neurosynth: NeuroSynth = field(init=False)
     chronoweave: ChronoWeave = field(init=False)
@@ -104,9 +118,17 @@ class OuroborosLoop:
     # ------------------------------------------------------------------
 
     def run(self, task: str) -> LoopResult:
-        """Run one complete Imagine→Simulate→Validate→Execute→Expand cycle."""
-        # 1. Imagine — NeuroSynth dreams up candidate solutions.
-        prototypes = self.neurosynth.imagine(task, k=self.imagine_k)
+        """Run one complete Recall→Imagine→Simulate→Validate→Execute→Expand cycle."""
+        # 0. Recall — KnowledgeBase retrieves grounding context before imagination.
+        kb_context: list[str] = []
+        if self.knowledge_base is not None:
+            hits = self.knowledge_base.query(task, k_rerank=3)
+            kb_context = [h.chunk.content for h in hits]
+
+        # 1. Imagine — NeuroSynth dreams up candidate solutions, grounded by recall.
+        prototypes = self.neurosynth.imagine(
+            task, k=self.imagine_k, context=kb_context
+        )
 
         # 2. Simulate — ChronoWeave collapses the multiverse to one path.
         timeline = self.chronoweave.simulate(task, prototypes, self.state)
@@ -125,6 +147,8 @@ class OuroborosLoop:
                 blocked=True,
             )
             self.history.append(result)
+            if self.memory is not None:
+                self.memory.save_result(result)
             return result
 
         # 4. Execute / Evolve — MetaMorph runs it, synthesizing skills on gaps.
@@ -151,6 +175,8 @@ class OuroborosLoop:
             step=self.state.step,
         )
         self.history.append(result)
+        if self.memory is not None:
+            self.memory.save_result(result)
         return result
 
     def run_many(self, tasks: list[str]) -> list[LoopResult]:

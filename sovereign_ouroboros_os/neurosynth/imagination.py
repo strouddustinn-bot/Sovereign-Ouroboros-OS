@@ -81,7 +81,9 @@ class NeuroSynth:
     # Public API
     # ------------------------------------------------------------------
 
-    def imagine(self, task: str, k: int = 3) -> list[Prototype]:
+    def imagine(
+        self, task: str, k: int = 3, context: list[str] | None = None
+    ) -> list[Prototype]:
         """Imagine *k* distinct candidate prototypes for *task*.
 
         Synthesizes the multi-sensory latent buffer for *task*, then frames it
@@ -89,14 +91,19 @@ class NeuroSynth:
         result is sorted by descending confidence and is fully deterministic.
 
         Args:
-            task: Natural language description of the problem to imagine.
-            k:    Number of candidate prototypes to generate (clamped to >= 1).
+            task:    Natural language description of the problem to imagine.
+            k:       Number of candidate prototypes to generate (clamped to >= 1).
+            context: Optional list of retrieved knowledge passages that ground
+                     the imagination (e.g. from the KnowledgeBase recall stage).
+                     When provided, the task's latent is blended with embeddings
+                     of the context passages so imagination is anchored to
+                     factual background knowledge.
 
         Returns:
             A list of exactly ``max(k, 1)`` prototypes, best confidence first.
         """
         k = max(int(k), 1)
-        self._buffer = self._build_buffer(task)
+        self._buffer = self._build_buffer(task, context=context or [])
 
         prototypes = [
             self._frame_prototype(task, framing, index)
@@ -118,8 +125,13 @@ class NeuroSynth:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_buffer(self, task: str) -> _LatentBuffer:
-        """Synthesize and fuse the per-modality mental model for *task*."""
+    def _build_buffer(self, task: str, context: list[str] | None = None) -> _LatentBuffer:
+        """Synthesize and fuse the per-modality mental model for *task*.
+
+        When *context* passages are supplied (e.g. from KB recall), the task's
+        fused latent is blended with a context centroid so imagination is
+        grounded in retrieved factual knowledge.
+        """
         modalities = {
             modality: embed(f"{modality} {task}")
             for modality in _MODALITY_WEIGHTS
@@ -127,6 +139,13 @@ class NeuroSynth:
         vectors = list(modalities.values())
         weights = [_MODALITY_WEIGHTS[name] for name in modalities]
         fused = blend(vectors, weights)
+
+        if context:
+            context_vecs = [embed(c) for c in context[:5]]  # cap at 5 passages
+            context_centroid = blend(context_vecs)
+            # Blend task latent (dominant) with knowledge centroid (subordinate)
+            fused = blend([fused, context_centroid], [1.0, 0.4])
+
         return _LatentBuffer(task=task, modalities=modalities, fused=fused)
 
     def _frame_prototype(self, task: str, framing: str, index: int) -> Prototype:

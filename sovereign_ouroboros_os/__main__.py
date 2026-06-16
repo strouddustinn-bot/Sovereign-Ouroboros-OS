@@ -4,6 +4,8 @@ Usage::
 
     python -m sovereign_ouroboros_os "rewrite the cache layer"
     python -m sovereign_ouroboros_os            # runs a built-in demo reel
+    python -m sovereign_ouroboros_os serve      # starts the FastAPI server on :8000
+    python -m sovereign_ouroboros_os serve --port 9000
 """
 
 from __future__ import annotations
@@ -79,8 +81,49 @@ def _render(result: LoopResult) -> None:
     print(_RULE + "\n")
 
 
+def _serve(argv: list[str]) -> int:
+    """Start the FastAPI server via uvicorn.
+
+    Parses an optional ``--port PORT`` argument from *argv* (the args that
+    follow ``serve``).  All other arguments are silently ignored so that
+    callers can pass extra uvicorn flags in the future without breaking the
+    entry point.
+    """
+    import uvicorn  # local import: only needed for the serve sub-command
+
+    port = 8000
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("--port", "-p") and i + 1 < len(argv):
+            try:
+                port = int(argv[i + 1])
+            except ValueError:
+                print(f"Invalid port: {argv[i + 1]!r}", file=sys.stderr)
+                return 1
+            i += 2
+        else:
+            i += 1
+
+    print(BANNER)
+    print(f"Starting Ouroboros API on http://0.0.0.0:{port} …")
+    uvicorn.run(
+        "sovereign_ouroboros_os.api.app:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+
+    # -----------------------------------------------------------------------
+    # serve sub-command: delegate before printing the banner or creating a loop
+    # -----------------------------------------------------------------------
+    if argv and argv[0] == "serve":
+        return _serve(argv[1:])
+
     print(BANNER)
 
     os = OuroborosLoop()

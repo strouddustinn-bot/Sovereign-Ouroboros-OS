@@ -21,11 +21,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from sovereign_ouroboros_os.core.embedding import cosine, embed
 from sovereign_ouroboros_os.core.types import (
     ExecutionResult,
     ProposedAction,
     Skill,
 )
+
+# Minimum cosine similarity for a skill to be considered a candidate for
+# composition with a given intent.
+_COMPOSITION_THRESHOLD: float = 0.35
 
 # ---------------------------------------------------------------------------
 # Sandbox configuration
@@ -150,14 +155,32 @@ class MetaMorph:
     def execute(self, action: ProposedAction) -> ExecutionResult:
         """Execute *action*, synthesizing a skill if none already handles it.
 
-        Resolution matches a registered capability keyword against the action's
-        intent. On a miss the engine synthesizes, validates, and registers a new
+        Resolution order:
+
+        1. Keyword / route lookup in the existing registry.
+        2. Skill *composition* – if two registered skills are both
+           semantically close to *intent*, build a composed pipeline.
+        3. Deterministic synthesis from source template.
+
+        On a miss the engine synthesizes, validates, and registers a new
         skill, then runs it -- flagging ``synthesized=True`` on the result.
         """
         skill = self._resolve(action.intent)
         synthesized = False
+        detail = ""
 
         if skill is None:
+            # --- attempt composition before falling back to synthesis ---
+            composed = self.compose_skills(action.intent)
+            if composed is not None and self.validate_skill(composed):
+                self.registry[composed.name] = composed
+                self._routes[action.intent.lower()] = composed.name
+                skill = composed
+                synthesized = False
+                detail = "composed"
+
+        if skill is None:
+            # --- last resort: deterministic synthesis ---
             candidate = self.synthesize_skill(action.intent)
             if not self.validate_skill(candidate):
                 return ExecutionResult(
@@ -193,7 +216,74 @@ class MetaMorph:
             output=output,
             skill_used=skill.name,
             synthesized=synthesized,
-            detail="",
+            detail=detail,
+        )
+
+    def compose_skills(self, intent: str) -> Skill | None:
+        """Attempt to build a composed :class:`Skill` from two registry candidates.
+
+        A skill is a *candidate* for the given *intent* when either:
+
+        * Its name appears as a substring of *intent* (lexical match), or
+        * The cosine similarity between ``embed(skill_name)`` and
+          ``embed(intent)`` exceeds :data:`_COMPOSITION_THRESHOLD`.
+
+        When at least two distinct candidates are found, the first two are
+        wired into a sequential pipeline: the first skill's output is passed
+        to the second as ``params["prior"]``.  The composed :class:`Skill` is
+        returned without being registered – the caller is responsible for
+        validation and registration.
+
+        Returns ``None`` when fewer than two candidates can be identified.
+
+        Parameters
+        ----------
+        intent:
+            The intent string driving capability resolution.
+
+        Returns
+        -------
+        Skill | None:
+            A composed skill, or ``None`` if composition is not possible.
+        """
+        lowered = intent.lower()
+        intent_vec = embed(intent)
+
+        candidates: list[Skill] = []
+        for name, skill in self.registry.items():
+            # Lexical match: skill name is a substring of the intent.
+            is_lexical = name in lowered
+            # Semantic match: cosine similarity above threshold.
+            is_semantic = cosine(embed(name), intent_vec) > _COMPOSITION_THRESHOLD
+
+            if is_lexical or is_semantic:
+                candidates.append(skill)
+            if len(candidates) == 2:
+                break  # we only need two
+
+        if len(candidates) < 2:
+            return None
+
+        first, second = candidates[0], candidates[1]
+        composed_name = f"composed_{first.name}__{second.name}"
+
+        def _composed_fn(
+            intent: str,
+            params: dict[str, Any],
+            _first: Skill = first,
+            _second: Skill = second,
+        ) -> dict[str, Any]:
+            """Call *first*, pass its result as ``params["prior"]`` to *second*."""
+            prior = _first.fn(intent, dict(params))
+            merged_params = dict(params)
+            merged_params["prior"] = prior
+            return _second.fn(intent, merged_params)
+
+        return Skill(
+            name=composed_name,
+            fn=_composed_fn,
+            source="composed",
+            synthesized=False,
         )
 
     def synthesize_skill(self, intent: str) -> Skill:
