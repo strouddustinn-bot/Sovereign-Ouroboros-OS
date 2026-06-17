@@ -21,6 +21,7 @@ import concurrent.futures
 import re
 import threading
 import warnings
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -140,12 +141,25 @@ class MetaMorph:
     max_registry_size: int = 256
     _lock: threading.Lock = field(init=False, default_factory=threading.Lock)
     _executor: concurrent.futures.ThreadPoolExecutor = field(init=False)
+    _finalizer: weakref.finalize = field(init=False)
 
     def __post_init__(self) -> None:
         """Seed the registry with the deterministic builtin skills."""
         # Shared thread pool — reused across execute() calls to avoid the
         # per-call overhead of creating and tearing down an Executor.
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        # Bounded (max_workers) so a tenant's runaway/hung skills can only
+        # saturate this tenant's own pool, never a global one (each
+        # OuroborosLoop builds its own MetaMorph).
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="metamorph-skill"
+        )
+        # Tear the pool down when this MetaMorph is garbage-collected so we do
+        # not leak worker threads per tenant for the process lifetime. The
+        # finalizer binds the executor's shutdown, not `self`, so it does not
+        # keep this instance alive.
+        self._finalizer = weakref.finalize(
+            self, self._executor.shutdown, wait=False, cancel_futures=True
+        )
         if not self.registry:
             for name, fn in _BUILTIN_SKILLS:
                 self.registry[name] = Skill(
@@ -160,6 +174,21 @@ class MetaMorph:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Shut down the skill-execution thread pool. Idempotent.
+
+        Call this when a MetaMorph (or its owning OuroborosLoop) is retired to
+        release worker threads immediately instead of waiting for GC. Running
+        the finalizer here also disarms the weakref fallback.
+        """
+        self._finalizer()
+
+    def __enter__(self) -> MetaMorph:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     @property
     def skills(self) -> list[str]:
@@ -224,6 +253,11 @@ class MetaMorph:
         try:
             output = future.result(timeout=_SKILL_TIMEOUT)
         except concurrent.futures.TimeoutError:
+            # NOTE: Python cannot forcibly kill a thread, so a timed-out skill
+            # keeps running on its worker until it returns on its own. The call
+            # still returns promptly here (result() honours the timeout); the
+            # cost is reduced pool throughput until the runaway finishes. The
+            # bounded, per-tenant pool caps the blast radius to one tenant.
             output = {"error": "skill timed out", "intent": action.intent}
             ok = False
         except Exception as exc:  # pragma: no cover - defensive guard
