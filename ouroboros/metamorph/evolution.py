@@ -209,6 +209,15 @@ class MetaMorph:
         skill, then runs it -- flagging ``synthesized=True`` on the result.
         Skill execution is bounded to :data:`_SKILL_TIMEOUT` seconds.
         """
+        if self._executor._shutdown:
+            return ExecutionResult(
+                ok=False,
+                output=None,
+                skill_used="__closed__",
+                synthesized=False,
+                detail="MetaMorph executor has been shut down; call is a no-op",
+            )
+
         skill = self._resolve(action.intent)
         synthesized = False
         detail = ""

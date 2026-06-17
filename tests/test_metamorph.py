@@ -1,5 +1,9 @@
 """Tests for the MetaMorph self-modifying execution engine."""
 
+import sys
+
+import pytest
+
 from ouroboros.core import ProposedAction
 from ouroboros.metamorph import MetaMorph
 
@@ -126,6 +130,10 @@ def test_context_manager_closes_executor():
     assert engine._executor._shutdown is True
 
 
+@pytest.mark.skipif(
+    sys.implementation.name != "cpython",
+    reason="weakref finalizer timing is CPython-specific; other implementations may not synchronously collect on gc.collect()",
+)
 def test_finalizer_shuts_down_executor_on_gc():
     import gc
 

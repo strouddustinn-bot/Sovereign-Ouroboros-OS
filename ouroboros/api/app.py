@@ -59,9 +59,12 @@ if _raw_cors.strip():
 else:
     _CORS_ORIGINS = ["http://localhost:3000", "http://localhost:8080"]
 
-# Dev mode (no key): allow any origin so local tooling works out of the box.
-# Production (key set): restrict to the configured allowlist.
-_allow_origins = _CORS_ORIGINS if _API_KEY else ["*"]
+# Explicit dev-mode flag: set OUROBOROS_DEV_MODE=1 in local environments.
+# Using a dedicated flag (rather than inferring from API key absence) means a
+# misconfigured production deploy that forgets to set OUROBOROS_API_KEY will
+# NOT silently open CORS to "*".
+_DEV_MODE = os.getenv("OUROBOROS_DEV_MODE", "").lower() in {"1", "true", "yes"}
+_allow_origins = ["*"] if _DEV_MODE else _CORS_ORIGINS
 
 # ---------------------------------------------------------------------------
 # Application factory

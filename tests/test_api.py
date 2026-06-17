@@ -22,6 +22,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from ouroboros.api.app import app, _loop, _get_loop, _rate_buckets
 from ouroboros.ouroboros_loop import DEFAULT_PRINCIPLES
@@ -428,6 +429,8 @@ def test_ws_rejects_missing_api_key_in_keyed_mode() -> None:
             data = json.loads(ws.receive_text())
             assert "error" in data
             assert "unauthorized" in data["error"].lower()
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
     finally:
         app_module._API_KEY = original
 
@@ -442,13 +445,18 @@ def test_ws_accepts_valid_api_key_in_keyed_mode() -> None:
         with client.websocket_connect("/ws/run") as ws:
             ws.send_text(json.dumps({"task": "echo hello", "api_key": "test-secret-ws-ok"}))
             stages: list[str] = []
+            last_msg: dict = {}
             while True:
                 msg = json.loads(ws.receive_text())
+                assert "error" not in msg, f"Unexpected error frame: {msg}"
                 stages.append(msg.get("stage", ""))
+                last_msg = msg
                 if msg.get("stage") == "complete":
                     break
         assert "neurosynth" in stages
         assert "complete" in stages
+        assert last_msg.get("stage") == "complete"
+        assert "succeeded" in last_msg
     finally:
         app_module._API_KEY = original
 
