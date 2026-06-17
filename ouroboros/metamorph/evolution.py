@@ -139,9 +139,13 @@ class MetaMorph:
     _routes: dict[str, str] = field(default_factory=dict)
     max_registry_size: int = 256
     _lock: threading.Lock = field(init=False, default_factory=threading.Lock)
+    _executor: concurrent.futures.ThreadPoolExecutor = field(init=False)
 
     def __post_init__(self) -> None:
         """Seed the registry with the deterministic builtin skills."""
+        # Shared thread pool — reused across execute() calls to avoid the
+        # per-call overhead of creating and tearing down an Executor.
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         if not self.registry:
             for name, fn in _BUILTIN_SKILLS:
                 self.registry[name] = Skill(
@@ -216,21 +220,20 @@ class MetaMorph:
             synthesized = True
 
         ok = True
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(skill.fn, action.intent, dict(action.params))
-            try:
-                output = future.result(timeout=_SKILL_TIMEOUT)
-            except concurrent.futures.TimeoutError:
-                output = {"error": "skill timed out", "intent": action.intent}
-                ok = False
-            except Exception as exc:  # pragma: no cover - defensive guard
-                return ExecutionResult(
-                    ok=False,
-                    output=None,
-                    skill_used=skill.name,
-                    synthesized=synthesized,
-                    detail=f"skill {skill.name!r} raised: {exc!r}",
-                )
+        future = self._executor.submit(skill.fn, action.intent, dict(action.params))
+        try:
+            output = future.result(timeout=_SKILL_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            output = {"error": "skill timed out", "intent": action.intent}
+            ok = False
+        except Exception as exc:  # pragma: no cover - defensive guard
+            return ExecutionResult(
+                ok=False,
+                output=None,
+                skill_used=skill.name,
+                synthesized=synthesized,
+                detail=f"skill {skill.name!r} raised: {exc!r}",
+            )
 
         return ExecutionResult(
             ok=ok,

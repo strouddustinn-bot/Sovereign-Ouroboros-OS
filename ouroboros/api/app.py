@@ -59,8 +59,9 @@ if _raw_cors.strip():
 else:
     _CORS_ORIGINS = ["http://localhost:3000", "http://localhost:8080"]
 
-# When an API key is set, never fall back to wildcard origins.
-_allow_origins = _CORS_ORIGINS if _API_KEY else _CORS_ORIGINS
+# Dev mode (no key): allow any origin so local tooling works out of the box.
+# Production (key set): restrict to the configured allowlist.
+_allow_origins = _CORS_ORIGINS if _API_KEY else ["*"]
 
 # ---------------------------------------------------------------------------
 # Application factory
@@ -287,13 +288,15 @@ async def health_check() -> dict[str, str]:
 
 
 @app.get("/metrics")
-async def metrics() -> dict[str, Any]:
-    """Return loop step count, history length, skill count, and principle count."""
+async def metrics(tenant_id: str = Depends(_get_tenant)) -> dict[str, Any]:
+    """Return per-tenant loop metrics (auth + rate-limit required)."""
+    _check_rate_limit(tenant_id)
+    loop = _get_loop(tenant_id)
     return {
-        "loop_step": _loop.state.step,
-        "history_count": len(_loop.history),
-        "skill_count": len(_loop.metamorph.skills),
-        "principle_count": len(_loop.ethos.principles),
+        "loop_step": loop.state.step,
+        "history_count": len(loop.history),
+        "skill_count": len(loop.metamorph.skills),
+        "principle_count": len(loop.ethos.principles),
     }
 
 
@@ -313,13 +316,7 @@ async def run_task(
     task_hash = hashlib.sha256(body.task.encode()).hexdigest()[:16]
     t0 = time.monotonic()
     logger.info("api.run.start tenant=%r task_hash=%s", tenant_id, task_hash)
-    # Override imagine_k per-request if caller supplied it.
-    saved_k = loop.imagine_k
-    loop.imagine_k = body.imagine_k
-    try:
-        result = loop.run(body.task)
-    finally:
-        loop.imagine_k = saved_k
+    result = loop.run(body.task, imagine_k=body.imagine_k)
     duration = time.monotonic() - t0
     logger.info(
         "api.run.complete tenant=%r task_hash=%s duration=%.3fs succeeded=%s",
