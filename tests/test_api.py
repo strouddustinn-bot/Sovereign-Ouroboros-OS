@@ -22,6 +22,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from ouroboros.api.app import app, _loop, _get_loop, _rate_buckets
 from ouroboros.ouroboros_loop import DEFAULT_PRINCIPLES
@@ -409,3 +410,76 @@ def test_ws_accepts_normal_message() -> None:
                 break
     assert "neurosynth" in stages
     assert "complete" in stages
+
+
+# ---------------------------------------------------------------------------
+# WebSocket – auth and rate-limit behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_ws_rejects_missing_api_key_in_keyed_mode() -> None:
+    """In keyed mode, a WS payload without api_key must yield an unauthorized error."""
+    import ouroboros.api.app as app_module
+
+    original = app_module._API_KEY
+    try:
+        app_module._API_KEY = "test-secret-ws"
+        with client.websocket_connect("/ws/run") as ws:
+            ws.send_text(json.dumps({"task": "do something"}))
+            data = json.loads(ws.receive_text())
+            assert "error" in data
+            assert "unauthorized" in data["error"].lower()
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
+    finally:
+        app_module._API_KEY = original
+
+
+def test_ws_accepts_valid_api_key_in_keyed_mode() -> None:
+    """A WS payload with the correct api_key must proceed through all stages."""
+    import ouroboros.api.app as app_module
+
+    original = app_module._API_KEY
+    try:
+        app_module._API_KEY = "test-secret-ws-ok"
+        with client.websocket_connect("/ws/run") as ws:
+            ws.send_text(json.dumps({"task": "echo hello", "api_key": "test-secret-ws-ok"}))
+            stages: list[str] = []
+            last_msg: dict = {}
+            while True:
+                msg = json.loads(ws.receive_text())
+                assert "error" not in msg, f"Unexpected error frame: {msg}"
+                stages.append(msg.get("stage", ""))
+                last_msg = msg
+                if msg.get("stage") == "complete":
+                    break
+        assert "neurosynth" in stages
+        assert "complete" in stages
+        assert last_msg.get("stage") == "complete"
+        assert "succeeded" in last_msg
+    finally:
+        app_module._API_KEY = original
+
+
+def test_ws_rate_limit_returns_error_frame() -> None:
+    """A rate-limited tenant must receive a rate-limit error frame over WS."""
+    import ouroboros.api.app as app_module
+
+    tenant = "ws-rate-limited-tenant"
+    original_key = app_module._API_KEY
+    try:
+        app_module._API_KEY = tenant
+        # Drain the bucket so the next request is over the limit.
+        with app_module._rate_lock:
+            app_module._rate_buckets[tenant] = (0.0, time.monotonic())
+
+        with client.websocket_connect("/ws/run") as ws:
+            ws.send_text(json.dumps({"task": "any task", "api_key": tenant}))
+            data = json.loads(ws.receive_text())
+            assert "error" in data
+            assert "rate" in data["error"].lower() or "limit" in data["error"].lower()
+            assert "retry_after" in data
+    finally:
+        app_module._API_KEY = original_key
+        with app_module._rate_lock:
+            app_module._rate_buckets.pop(tenant, None)

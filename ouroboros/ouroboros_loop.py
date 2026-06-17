@@ -122,8 +122,16 @@ class OuroborosLoop:
     # The full cycle
     # ------------------------------------------------------------------
 
-    def run(self, task: str) -> LoopResult:
-        """Run one complete Recall→Imagine→Simulate→Validate→Execute→Expand cycle."""
+    def run(self, task: str, imagine_k: int | None = None) -> LoopResult:
+        """Run one complete Recall→Imagine→Simulate→Validate→Execute→Expand cycle.
+
+        Args:
+            task:      Natural language task description.
+            imagine_k: Override the instance-level ``imagine_k`` for this call
+                       only.  Does not mutate shared state, so concurrent calls
+                       with different values are safe.
+        """
+        k = imagine_k if imagine_k is not None else self.imagine_k
         logger.info("loop.start task=%r step=%d", task, self.state.step)
 
         # 0. Recall — KnowledgeBase retrieves grounding context before imagination.
@@ -136,7 +144,7 @@ class OuroborosLoop:
         try:
             # 1. Imagine — NeuroSynth dreams up candidate solutions, grounded by recall.
             prototypes = self.neurosynth.imagine(
-                task, k=self.imagine_k, context=kb_context
+                task, k=k, context=kb_context
             )
             logger.info("loop.imagine prototypes=%d", len(prototypes))
 
