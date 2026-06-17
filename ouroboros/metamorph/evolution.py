@@ -17,7 +17,10 @@ All generation is deterministic: the same intent always yields the same skill.
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
+import threading
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -31,6 +34,9 @@ from ouroboros.core.types import (
 # Minimum cosine similarity for a skill to be considered a candidate for
 # composition with a given intent.
 _COMPOSITION_THRESHOLD: float = 0.35
+
+# Wall-clock timeout for skill execution (seconds).
+_SKILL_TIMEOUT: float = 5.0
 
 # ---------------------------------------------------------------------------
 # Sandbox configuration
@@ -124,11 +130,15 @@ class MetaMorph:
     sandboxed validation, and a hot-swap into the live registry.
 
     Attributes:
-        registry: Live mapping of capability keyword -> :class:`Skill`.
+        registry:          Live mapping of capability keyword -> :class:`Skill`.
+        max_registry_size: Maximum number of skills in the registry; oldest
+                           synthesized skill is evicted when the cap is reached.
     """
 
     registry: dict[str, Skill] = field(default_factory=dict)
     _routes: dict[str, str] = field(default_factory=dict)
+    max_registry_size: int = 256
+    _lock: threading.Lock = field(init=False, default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         """Seed the registry with the deterministic builtin skills."""
@@ -164,6 +174,7 @@ class MetaMorph:
 
         On a miss the engine synthesizes, validates, and registers a new
         skill, then runs it -- flagging ``synthesized=True`` on the result.
+        Skill execution is bounded to :data:`_SKILL_TIMEOUT` seconds.
         """
         skill = self._resolve(action.intent)
         synthesized = False
@@ -173,8 +184,10 @@ class MetaMorph:
             # --- attempt composition before falling back to synthesis ---
             composed = self.compose_skills(action.intent)
             if composed is not None and self.validate_skill(composed):
-                self.registry[composed.name] = composed
-                self._routes[action.intent.lower()] = composed.name
+                self._evict_if_needed()
+                with self._lock:
+                    self.registry[composed.name] = composed
+                    self._routes[action.intent.lower()] = composed.name
                 skill = composed
                 synthesized = False
                 detail = "composed"
@@ -193,26 +206,34 @@ class MetaMorph:
                         "validation; not registered"
                     ),
                 )
-            self.registry[candidate.name] = candidate
-            # Route the originating intent to the new skill so identical
-            # future intents resolve it directly instead of re-synthesizing.
-            self._routes[action.intent.lower()] = candidate.name
+            self._evict_if_needed()
+            with self._lock:
+                self.registry[candidate.name] = candidate
+                # Route the originating intent to the new skill so identical
+                # future intents resolve it directly instead of re-synthesizing.
+                self._routes[action.intent.lower()] = candidate.name
             skill = candidate
             synthesized = True
 
-        try:
-            output = skill.fn(action.intent, dict(action.params))
-        except Exception as exc:  # pragma: no cover - defensive guard
-            return ExecutionResult(
-                ok=False,
-                output=None,
-                skill_used=skill.name,
-                synthesized=synthesized,
-                detail=f"skill {skill.name!r} raised: {exc!r}",
-            )
+        ok = True
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(skill.fn, action.intent, dict(action.params))
+            try:
+                output = future.result(timeout=_SKILL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                output = {"error": "skill timed out", "intent": action.intent}
+                ok = False
+            except Exception as exc:  # pragma: no cover - defensive guard
+                return ExecutionResult(
+                    ok=False,
+                    output=None,
+                    skill_used=skill.name,
+                    synthesized=synthesized,
+                    detail=f"skill {skill.name!r} raised: {exc!r}",
+                )
 
         return ExecutionResult(
-            ok=True,
+            ok=ok,
             output=output,
             skill_used=skill.name,
             synthesized=synthesized,
@@ -250,7 +271,10 @@ class MetaMorph:
         intent_vec = embed(intent)
 
         candidates: list[Skill] = []
-        for name, skill in self.registry.items():
+        with self._lock:
+            registry_items = list(self.registry.items())
+
+        for name, skill in registry_items:
             # Lexical match: skill name is a substring of the intent.
             is_lexical = name in lowered
             # Semantic match: cosine similarity above threshold.
@@ -322,6 +346,24 @@ class MetaMorph:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _evict_if_needed(self) -> None:
+        """Evict the oldest registry entry when the size cap is reached."""
+        with self._lock:
+            if len(self.registry) >= self.max_registry_size:
+                oldest_key = next(iter(self.registry))
+                del self.registry[oldest_key]
+                # Also remove any routes pointing to this skill.
+                stale_routes = [
+                    k for k, v in self._routes.items() if v == oldest_key
+                ]
+                for k in stale_routes:
+                    del self._routes[k]
+                warnings.warn(
+                    f"MetaMorph: registry at capacity ({self.max_registry_size}); "
+                    f"evicted oldest skill {oldest_key!r}.",
+                    stacklevel=4,
+                )
 
     def _resolve(self, intent: str) -> Skill | None:
         """Return the registered skill handling *intent*, if any.
