@@ -8,7 +8,6 @@ from ouroboros.core.contracts import (
     Validator,
 )
 from ouroboros.core.embedding import blend, cosine, embed
-from ouroboros.core.logging import get_logger
 from ouroboros.core.types import (
     ExecutionResult,
     FederatedResult,
@@ -29,7 +28,6 @@ __all__ = [
     "blend",
     "cosine",
     "embed",
-    "get_logger",
     "ExecutionResult",
     "FederatedResult",
     "Prototype",

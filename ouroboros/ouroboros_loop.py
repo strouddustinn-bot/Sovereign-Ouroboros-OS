@@ -15,7 +15,6 @@ evolves the world state, closing the loop.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,7 +25,6 @@ from ouroboros.core import (
     Prototype,
     Timeline,
     WorldState,
-    get_logger,
 )
 from ouroboros.ethos_compiler import EthosCompiler, GateResult
 from ouroboros.hivemind import HiveMind
@@ -36,8 +34,6 @@ from ouroboros.neurosynth import NeuroSynth
 if TYPE_CHECKING:
     from ouroboros.knowledge import KnowledgeBase
     from ouroboros.memory import AgentMemory
-
-logger = get_logger(__name__)
 
 # The Sovereign Node's default moral compass, compiled at boot.
 DEFAULT_PRINCIPLES: list[str] = [
@@ -97,7 +93,6 @@ class OuroborosLoop:
     hivemind: HiveMind = field(init=False)
     state: WorldState = field(init=False)
     history: list[LoopResult] = field(init=False, default_factory=list)
-    _lock: threading.Lock = field(init=False, default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         self.neurosynth = NeuroSynth()
@@ -124,117 +119,65 @@ class OuroborosLoop:
 
     def run(self, task: str) -> LoopResult:
         """Run one complete Recall→Imagine→Simulate→Validate→Execute→Expand cycle."""
-        logger.info("loop.start task=%r step=%d", task, self.state.step)
-
         # 0. Recall — KnowledgeBase retrieves grounding context before imagination.
         kb_context: list[str] = []
         if self.knowledge_base is not None:
             hits = self.knowledge_base.query(task, k_rerank=3)
             kb_context = [h.chunk.content for h in hits]
-        logger.info("loop.recall hits=%d", len(kb_context))
 
-        try:
-            # 1. Imagine — NeuroSynth dreams up candidate solutions, grounded by recall.
-            prototypes = self.neurosynth.imagine(
-                task, k=self.imagine_k, context=kb_context
-            )
-            logger.info("loop.imagine prototypes=%d", len(prototypes))
+        # 1. Imagine — NeuroSynth dreams up candidate solutions, grounded by recall.
+        prototypes = self.neurosynth.imagine(
+            task, k=self.imagine_k, context=kb_context
+        )
 
-            # 2. Simulate — ChronoWeave collapses the multiverse to one path.
-            timeline = self.chronoweave.simulate(task, prototypes, self.state)
-            logger.info("loop.simulate score=%.4f", timeline.score)
+        # 2. Simulate — ChronoWeave collapses the multiverse to one path.
+        timeline = self.chronoweave.simulate(task, prototypes, self.state)
 
-            # 3. Validate — EthosCompiler gates the proposed action.
-            gate = self.ethos.gate(timeline.proposed_action.as_action_dict())
-            logger.info("loop.gate allowed=%s", gate.allowed)
-            if not gate.allowed:
-                logger.warning("loop.blocked reason=%r", gate.violations)
-                result = LoopResult(
-                    task=task,
-                    prototypes=prototypes,
-                    timeline=timeline,
-                    gate=gate,
-                    execution=None,
-                    federation=None,
-                    step=self.state.step,
-                    blocked=True,
-                )
-                with self._lock:
-                    self.history.append(result)
-                if self.memory is not None:
-                    self.memory.save_result(result)
-                return result
-
-            # 4. Execute / Evolve — MetaMorph runs it, synthesizing skills on gaps.
-            execution = self.metamorph.execute(timeline.proposed_action)
-            logger.info(
-                "loop.execute skill=%r synthesized=%s",
-                execution.skill_used,
-                execution.synthesized,
-            )
-
-            # 5. Expand — HiveMind federates the task across sovereign peers.
-            federation = self.hivemind.expand(task, execution.output)
-
-            # The loop eats its tail: evolve the world state for the next turn.
-            with self._lock:
-                self.state.step += 1
-                self.state.facts[task] = {
-                    "skill": execution.skill_used,
-                    "synthesized": execution.synthesized,
-                    "score": timeline.score,
-                }
-
+        # 3. Validate — EthosCompiler gates the proposed action.
+        gate = self.ethos.gate(timeline.proposed_action.as_action_dict())
+        if not gate.allowed:
             result = LoopResult(
                 task=task,
                 prototypes=prototypes,
                 timeline=timeline,
                 gate=gate,
-                execution=execution,
-                federation=federation,
-                step=self.state.step,
-            )
-            with self._lock:
-                self.history.append(result)
-            if self.memory is not None:
-                self.memory.save_result(result)
-            logger.info(
-                "loop.complete step=%d succeeded=%s", result.step, result.succeeded
-            )
-            return result
-
-        except Exception as exc:
-            reason = f"Unhandled exception in Ouroboros loop: {exc!r}"
-            logger.error("loop.error task=%r error=%r", task, exc)
-            error_gate = GateResult(
-                allowed=False,
-                violations=["internal_error"],
-                reason=reason,
-            )
-            from ouroboros.core.types import ProposedAction
-
-            _dummy_action = ProposedAction(intent=task)
-            _dummy_timeline = Timeline(
-                id="error",
-                proposed_action=_dummy_action,
-                score=0.0,
-                rationale=reason,
-            )
-            result = LoopResult(
-                task=task,
-                prototypes=[],
-                timeline=_dummy_timeline,
-                gate=error_gate,
                 execution=None,
                 federation=None,
                 step=self.state.step,
                 blocked=True,
             )
-            with self._lock:
-                self.history.append(result)
+            self.history.append(result)
             if self.memory is not None:
                 self.memory.save_result(result)
             return result
+
+        # 4. Execute / Evolve — MetaMorph runs it, synthesizing skills on gaps.
+        execution = self.metamorph.execute(timeline.proposed_action)
+
+        # 5. Expand — HiveMind federates the task across sovereign peers.
+        federation = self.hivemind.expand(task, execution.output)
+
+        # The loop eats its tail: evolve the world state for the next turn.
+        self.state.step += 1
+        self.state.facts[task] = {
+            "skill": execution.skill_used,
+            "synthesized": execution.synthesized,
+            "score": timeline.score,
+        }
+
+        result = LoopResult(
+            task=task,
+            prototypes=prototypes,
+            timeline=timeline,
+            gate=gate,
+            execution=execution,
+            federation=federation,
+            step=self.state.step,
+        )
+        self.history.append(result)
+        if self.memory is not None:
+            self.memory.save_result(result)
+        return result
 
     def run_many(self, tasks: list[str]) -> list[LoopResult]:
         """Run the loop over a sequence of tasks, evolving state between them."""
