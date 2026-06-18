@@ -175,6 +175,36 @@ class MetaMorph:
     # Public API
     # ------------------------------------------------------------------
 
+    def register_skill(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        source: str = "compliance",
+    ) -> None:
+        """Register an externally provided skill by *name*.
+
+        The skill is validated via :meth:`validate_skill` before being added.
+        A warning is emitted and the skill is skipped if validation fails.
+        Also registers a space-separated route so that natural language intents
+        (e.g. ``"hipaa check"`` for skill ``"hipaa_check"``) resolve correctly.
+        """
+        skill = Skill(name=name, fn=fn, source=source, synthesized=False)
+        if not self.validate_skill(skill):
+            warnings.warn(
+                f"MetaMorph: {source} skill {name!r} failed validation; not registered.",
+                stacklevel=2,
+            )
+            return
+        self._evict_if_needed()
+        with self._lock:
+            self.registry[name] = skill
+            self._routes[name] = name
+            # Natural language route: "hipaa_check" → "hipaa check" in intent.
+            space_key = name.replace("_", " ")
+            if space_key != name:
+                self._routes[space_key] = name
+
     def close(self) -> None:
         """Shut down the skill-execution thread pool. Idempotent.
 
