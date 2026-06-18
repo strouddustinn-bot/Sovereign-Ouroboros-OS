@@ -43,7 +43,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from ouroboros.api.app import app, _loop, _get_loop, _rate_buckets
+from ouroboros.api.app import app, _loop, _get_loop, _rate_buckets, WS_MAX_MESSAGE_BYTES
 from ouroboros.ouroboros_loop import DEFAULT_PRINCIPLES
 
 client = TestClient(app)
@@ -55,7 +55,8 @@ client = TestClient(app)
 TEST_API_KEY = "test-secret-key-xyz"
 TEST_TASK_BENIGN = "summarize the research notes"
 TEST_TASK_BLOCKED = "harm the production database"
-WS_MESSAGE_MAX_SIZE = 8192
+# Imported from app so tests stay in sync with the server-side limit.
+WS_MESSAGE_MAX_SIZE = WS_MAX_MESSAGE_BYTES
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,13 +80,24 @@ def _fresh_client_with_key(key: str) -> TestClient:
     return TestClient(app, headers={"X-API-Key": key})
 
 
-def _ws_consume_stages(ws, expected_final_stage: str = "complete") -> list[dict]:
+def _ws_consume_stages(
+    ws,
+    expected_final_stage: str = "complete",
+    max_frames: int = 50,
+) -> list[dict]:
     """Consume stage frames from *ws* until *expected_final_stage* is seen.
 
     Returns all consumed messages including the terminal one.
+    Raises RuntimeError if *max_frames* is exceeded (guards against hangs on
+    protocol regressions that never emit the expected final stage).
     """
     messages: list[dict] = []
     while True:
+        if len(messages) >= max_frames:
+            raise RuntimeError(
+                f"_ws_consume_stages: exceeded {max_frames} frames without "
+                f"seeing stage={expected_final_stage!r}. Got: {messages}"
+            )
         msg = json.loads(ws.receive_text())
         messages.append(msg)
         if msg.get("stage") == expected_final_stage:
@@ -417,14 +429,14 @@ def test_ws_accepts_normal_message() -> None:
 @pytest.mark.parametrize(
     "api_key,should_pass",
     [
-        (None, False),            # missing api_key in payload
-        ("wrong-key", False),     # incorrect api_key
-        ("test-secret-ws", True), # correct api_key
+        (None, False),          # missing api_key in payload
+        ("wrong-key", False),   # incorrect api_key
+        (TEST_API_KEY, True),   # correct api_key
     ],
 )
 def test_ws_api_key_validation(api_key: str | None, should_pass: bool) -> None:
     """WS auth: missing/wrong key → unauthorized frame + disconnect; correct key → stages."""
-    with _patched_api_key("test-secret-ws"):
+    with _patched_api_key(TEST_API_KEY):
         with client.websocket_connect("/ws/run") as ws:
             payload: dict = {"task": "echo hello"}
             if api_key is not None:
