@@ -66,6 +66,9 @@ else:
 _DEV_MODE = os.getenv("OUROBOROS_DEV_MODE", "").lower() in {"1", "true", "yes"}
 _allow_origins = ["*"] if _DEV_MODE else _CORS_ORIGINS
 
+# WebSocket message size cap (bytes).  Exported so tests can stay in sync.
+WS_MAX_MESSAGE_BYTES: int = 8192
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
@@ -405,8 +408,10 @@ async def ws_run(websocket: WebSocket) -> None:
     raw = await websocket.receive_text()
 
     # Guard: reject oversized messages.
-    if len(raw.encode("utf-8")) > 8192:
-        await websocket.send_text(json.dumps({"error": "message too large (max 8192 bytes)"}))
+    if len(raw.encode("utf-8")) > WS_MAX_MESSAGE_BYTES:
+        await websocket.send_text(
+            json.dumps({"error": f"message too large (max {WS_MAX_MESSAGE_BYTES} bytes)"})
+        )
         await websocket.close()
         return
 

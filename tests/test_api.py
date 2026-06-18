@@ -1,42 +1,108 @@
 """Tests for the Ouroboros FastAPI REST service.
 
 Uses FastAPI's synchronous TestClient (backed by httpx) so no asyncio event
-loop wrangling is needed.  All tests share the single ``_loop`` instance that
-``app.py`` creates at import time, which means /history accumulates across
-calls in the same process — that is intentional and is what the history test
-verifies.
+loop wrangling is needed.
 
-New test sections cover:
-    - /health endpoint (no auth required)
-    - Pydantic request validation (400 on bad bodies)
-    - API key authentication (dev mode vs. keyed mode)
-    - Rate limiting (429 + Retry-After header)
-    - POST /principles with the new list-based request model
-    - WebSocket oversized-message guard
+IMPORTANT – shared test state
+==============================
+All tests share the OuroborosLoop instance created at app import time.
+This means:
+- /history accumulates across tests in the same process.
+- Per-tenant isolation tests rely on separate tenant IDs and _get_loop().
+- Tests that modify _API_KEY or _rate_buckets must clean up on exit.
+
+Use the ``_patched_api_key()`` context manager and the ``rate_limited_tenant``/
+``full_bucket_tenant`` fixtures (conftest.py) to avoid leaving state behind
+that could break later tests.
+
+Test sections:
+    - GET /health              (no auth required)
+    - POST /run                (basic + validation)
+    - GET /history
+    - GET /state
+    - GET /skills
+    - GET /principles
+    - POST /principles
+    - GET /metrics
+    - API key authentication
+    - Per-tenant isolation
+    - Rate limiting
+    - WebSocket – basic functionality
+    - WebSocket – authentication
+    - WebSocket – rate limiting
 """
 
 from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
+from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from ouroboros.api.app import app, _loop, _get_loop, _rate_buckets
+from ouroboros.api.app import app, _loop, _get_loop, _rate_buckets, WS_MAX_MESSAGE_BYTES
 from ouroboros.ouroboros_loop import DEFAULT_PRINCIPLES
 
 client = TestClient(app)
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+TEST_API_KEY = "test-secret-key-xyz"
+TEST_TASK_BENIGN = "summarize the research notes"
+TEST_TASK_BLOCKED = "harm the production database"
+# Imported from app so tests stay in sync with the server-side limit.
+WS_MESSAGE_MAX_SIZE = WS_MAX_MESSAGE_BYTES
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+@contextmanager
+def _patched_api_key(key: str | None) -> Iterator[None]:
+    """Temporarily patch module-level ``_API_KEY``; restore on exit."""
+    import ouroboros.api.app as app_module
+    original = app_module._API_KEY
+    app_module._API_KEY = key
+    try:
+        yield
+    finally:
+        app_module._API_KEY = original
+
+
 def _fresh_client_with_key(key: str) -> TestClient:
     """Return a TestClient that sends X-API-Key on every request."""
     return TestClient(app, headers={"X-API-Key": key})
+
+
+def _ws_consume_stages(
+    ws,
+    expected_final_stage: str = "complete",
+    max_frames: int = 50,
+) -> list[dict]:
+    """Consume stage frames from *ws* until *expected_final_stage* is seen.
+
+    Returns all consumed messages including the terminal one.
+    Raises RuntimeError if *max_frames* is exceeded (guards against hangs on
+    protocol regressions that never emit the expected final stage).
+    """
+    messages: list[dict] = []
+    while True:
+        if len(messages) >= max_frames:
+            raise RuntimeError(
+                f"_ws_consume_stages: exceeded {max_frames} frames without "
+                f"seeing stage={expected_final_stage!r}. Got: {messages}"
+            )
+        msg = json.loads(ws.receive_text())
+        messages.append(msg)
+        if msg.get("stage") == expected_final_stage:
+            break
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +119,12 @@ def test_health_no_auth() -> None:
     assert data["version"] == "0.1.0"
 
 
+def test_health_never_requires_auth() -> None:
+    """/health must return 200 even when an API key is configured."""
+    with _patched_api_key("some-key"):
+        assert client.get("/health").status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # POST /run
 # ---------------------------------------------------------------------------
@@ -60,7 +132,7 @@ def test_health_no_auth() -> None:
 
 def test_run_safe_task_succeeds() -> None:
     """A benign task should complete without being blocked."""
-    response = client.post("/run", json={"task": "summarize the research notes"})
+    response = client.post("/run", json={"task": TEST_TASK_BENIGN})
     assert response.status_code == 200
     data = response.json()
     assert data["succeeded"] is True
@@ -73,7 +145,7 @@ def test_run_safe_task_succeeds() -> None:
 
 def test_run_harmful_task_is_blocked() -> None:
     """A task that triggers the ethics gate should be blocked, not succeed."""
-    response = client.post("/run", json={"task": "harm the production database"})
+    response = client.post("/run", json={"task": TEST_TASK_BLOCKED})
     assert response.status_code == 200
     data = response.json()
     assert data["blocked"] is True
@@ -102,14 +174,12 @@ def test_run_task_too_long_returns_422() -> None:
 
 def test_run_imagine_k_out_of_range_returns_422() -> None:
     """imagine_k must be between 1 and 10 inclusive."""
-    response = client.post("/run", json={"task": "valid task", "imagine_k": 0})
-    assert response.status_code == 422
-    response2 = client.post("/run", json={"task": "valid task", "imagine_k": 11})
-    assert response2.status_code == 422
+    assert client.post("/run", json={"task": "valid task", "imagine_k": 0}).status_code == 422
+    assert client.post("/run", json={"task": "valid task", "imagine_k": 11}).status_code == 422
 
 
 def test_run_with_valid_imagine_k() -> None:
-    """imagine_k within range should be accepted."""
+    """imagine_k within [1, 10] should be accepted."""
     response = client.post("/run", json={"task": "list files in /tmp", "imagine_k": 5})
     assert response.status_code == 200
 
@@ -121,18 +191,13 @@ def test_run_with_valid_imagine_k() -> None:
 
 def test_history_grows_after_run_calls() -> None:
     """History list length should increase after each /run call."""
-    # Record baseline length
-    before = client.get("/history").json()
-    baseline = len(before)
+    baseline = len(client.get("/history").json())
 
-    # Run two more tasks
     client.post("/run", json={"task": "count words in document"})
     client.post("/run", json={"task": "reverse the log entries"})
 
     after = client.get("/history").json()
     assert len(after) == baseline + 2
-
-    # Each entry should have the expected summary keys
     entry = after[-1]
     assert "task" in entry
     assert "step" in entry
@@ -146,7 +211,7 @@ def test_history_grows_after_run_calls() -> None:
 
 
 def test_get_state_has_step_key() -> None:
-    """GET /state must return a dict that includes a numeric 'step' field."""
+    """GET /state must return a dict with a numeric 'step' field and 'facts'."""
     response = client.get("/state")
     assert response.status_code == 200
     data = response.json()
@@ -176,45 +241,38 @@ def test_get_skills_returns_list() -> None:
 
 
 def test_get_principles_contains_defaults() -> None:
-    """GET /principles must include the names derived from DEFAULT_PRINCIPLES."""
+    """GET /principles must include all DEFAULT_PRINCIPLES names."""
     response = client.get("/principles")
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
     assert len(data) > 0
-    # Each default principle should be represented by its first-60-char name.
     expected_names = {p[:60].rstrip() for p in DEFAULT_PRINCIPLES}
-    returned_names = set(data)
-    assert expected_names.issubset(returned_names)
+    assert expected_names.issubset(set(data))
 
 
 # ---------------------------------------------------------------------------
-# POST /principles  (new list-based model)
+# POST /principles
 # ---------------------------------------------------------------------------
 
 
 def test_post_principles_adds_to_list() -> None:
-    """POST /principles should add the new principles so they appear in GET /principles."""
+    """POST /principles should add new principles visible via GET /principles."""
     new_principles = ["Always ask before sending emails.", "Never overwrite prod data."]
-
     add_resp = client.post("/principles", json={"principles": new_principles})
     assert add_resp.status_code == 200
     body = add_resp.json()
     assert "added" in body
     assert set(body["added"]) == set(new_principles)
 
-    # Verify they now appear in the list
-    list_resp = client.get("/principles")
-    assert list_resp.status_code == 200
-    names = list_resp.json()
+    names = client.get("/principles").json()
     for p in new_principles:
         assert p[:60].rstrip() in names
 
 
 def test_post_principles_empty_list_returns_422() -> None:
     """An empty principles list violates min_length=1 — expect 422."""
-    response = client.post("/principles", json={"principles": []})
-    assert response.status_code == 422
+    assert client.post("/principles", json={"principles": []}).status_code == 422
 
 
 def test_post_principles_too_many_returns_422() -> None:
@@ -228,8 +286,50 @@ def test_post_principles_too_many_returns_422() -> None:
 
 def test_post_principles_missing_field_returns_422() -> None:
     """Omitting the 'principles' key should return 422."""
-    response = client.post("/principles", json={"principle": "single string"})
-    assert response.status_code == 422
+    assert client.post("/principles", json={"principle": "single string"}).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /metrics
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_endpoint_returns_stats() -> None:
+    """GET /metrics must return per-tenant loop metrics with expected integer fields."""
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    data = response.json()
+    expected_keys = {"loop_step", "history_count", "skill_count", "principle_count"}
+    assert expected_keys <= data.keys()
+    assert all(isinstance(data[k], int) for k in expected_keys)
+
+
+def test_metrics_requires_auth() -> None:
+    """GET /metrics must return 401 when a key is configured but not supplied."""
+    with _patched_api_key(TEST_API_KEY):
+        assert client.get("/metrics").status_code == 401
+
+
+def test_metrics_is_per_tenant() -> None:
+    """Each tenant sees their own history count, not another tenant's."""
+    key_a = "metrics-tenant-alpha"
+    key_b = "metrics-tenant-beta"
+
+    loop_a = _get_loop(key_a)
+    loop_b = _get_loop(key_b)
+    loop_a.history.clear()
+    loop_b.history.clear()
+
+    with _patched_api_key(key_a):
+        client.post("/run", json={"task": "alpha-only task"}, headers={"X-API-Key": key_a})
+        resp_a = client.get("/metrics", headers={"X-API-Key": key_a})
+    assert resp_a.status_code == 200
+    assert resp_a.json()["history_count"] == 1
+
+    with _patched_api_key(key_b):
+        resp_b = client.get("/metrics", headers={"X-API-Key": key_b})
+    assert resp_b.status_code == 200
+    assert resp_b.json()["history_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -237,55 +337,17 @@ def test_post_principles_missing_field_returns_422() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dev_mode_no_key_needed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """In dev mode (OUROBOROS_API_KEY unset) all requests go through without a key."""
-    # The module-level _API_KEY is already None in the test environment
-    # (tests run without OUROBOROS_API_KEY set), so the default client works.
-    response = client.get("/state")
-    assert response.status_code == 200
-
-
-def test_health_never_requires_auth() -> None:
-    """/health is always open, even if an API key env var were configured."""
-    response = client.get("/health")
-    assert response.status_code == 200
+def test_dev_mode_no_key_needed() -> None:
+    """In dev mode (OUROBOROS_API_KEY unset) all requests pass without a key."""
+    assert client.get("/state").status_code == 200
 
 
 def test_auth_with_api_key_set() -> None:
-    """When OUROBOROS_API_KEY is patched in, requests without a key get 401."""
-    import ouroboros.api.app as app_module
-
-    original_key = app_module._API_KEY
-    try:
-        # Patch the module-level _API_KEY as if the env var had been set at startup.
-        app_module._API_KEY = "test-secret-key-xyz"
-
-        # Request without the header should be rejected.
-        resp_no_key = client.get("/state")
-        assert resp_no_key.status_code == 401
-
-        # Request with the correct key should succeed.
-        resp_with_key = client.get("/state", headers={"X-API-Key": "test-secret-key-xyz"})
-        assert resp_with_key.status_code == 200
-
-        # Request with wrong key should be rejected.
-        resp_bad_key = client.get("/state", headers={"X-API-Key": "wrong-key"})
-        assert resp_bad_key.status_code == 401
-    finally:
-        app_module._API_KEY = original_key
-
-
-def test_health_no_401_when_api_key_set() -> None:
-    """/health must return 200 even when _API_KEY is patched."""
-    import ouroboros.api.app as app_module
-
-    original_key = app_module._API_KEY
-    try:
-        app_module._API_KEY = "some-key"
-        response = client.get("/health")
-        assert response.status_code == 200
-    finally:
-        app_module._API_KEY = original_key
+    """When _API_KEY is set, missing/wrong/correct keys are gated correctly."""
+    with _patched_api_key(TEST_API_KEY):
+        assert client.get("/state").status_code == 401
+        assert client.get("/state", headers={"X-API-Key": TEST_API_KEY}).status_code == 200
+        assert client.get("/state", headers={"X-API-Key": "wrong-key"}).status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -294,45 +356,24 @@ def test_health_no_401_when_api_key_set() -> None:
 
 
 def test_per_tenant_history_isolation() -> None:
-    """Different tenant IDs (API keys) should have separate histories."""
-    import ouroboros.api.app as app_module
+    """Different tenant IDs (API keys) must have separate independent histories."""
+    key_a, key_b = "tenant-alpha", "tenant-beta"
 
-    original_key = app_module._API_KEY
-    try:
-        # Use two different keys as two different tenants.
-        key_a = "tenant-alpha"
-        key_b = "tenant-beta"
+    loop_a = _get_loop(key_a)
+    loop_b = _get_loop(key_b)
+    loop_a.history.clear()
+    loop_b.history.clear()
 
-        # Make sure both tenant loops exist and reset their histories.
-        loop_a = _get_loop(key_a)
-        loop_b = _get_loop(key_b)
-        loop_a.history.clear()
-        loop_b.history.clear()
+    with _patched_api_key(key_a):
+        client.post("/run", json={"task": "tenant alpha task"}, headers={"X-API-Key": key_a})
 
-        app_module._API_KEY = key_a  # set required key to key_a first
-        client.post(
-            "/run",
-            json={"task": "tenant alpha task"},
-            headers={"X-API-Key": key_a},
-        )
+    with _patched_api_key(key_b):
+        client.post("/run", json={"task": "tenant beta task"}, headers={"X-API-Key": key_b})
 
-        # Switch the required key to key_b.
-        app_module._API_KEY = key_b
-        client.post(
-            "/run",
-            json={"task": "tenant beta task"},
-            headers={"X-API-Key": key_b},
-        )
-
-        # key_a's loop should still have exactly 1 entry.
-        assert len(loop_a.history) == 1
-        assert loop_a.history[0].task == "tenant alpha task"
-
-        # key_b's loop should have exactly 1 entry.
-        assert len(loop_b.history) == 1
-        assert loop_b.history[0].task == "tenant beta task"
-    finally:
-        app_module._API_KEY = original_key
+    assert len(loop_a.history) == 1
+    assert loop_a.history[0].task == "tenant alpha task"
+    assert len(loop_b.history) == 1
+    assert loop_b.history[0].task == "tenant beta task"
 
 
 # ---------------------------------------------------------------------------
@@ -340,146 +381,98 @@ def test_per_tenant_history_isolation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_rate_limit_returns_429_after_exhaustion() -> None:
+def test_rate_limit_returns_429_after_exhaustion(rate_limited_tenant: str) -> None:
     """After exhausting the rate bucket a 429 with Retry-After header is returned."""
-    import ouroboros.api.app as app_module
-
-    tenant = "rate-test-tenant"
-    # Pre-exhaust the bucket by forcing it to 0 tokens.
-    with app_module._rate_lock:
-        app_module._rate_buckets[tenant] = (0.0, time.monotonic())
-
-    original_key = app_module._API_KEY
-    try:
-        app_module._API_KEY = tenant
-        resp = client.get("/state", headers={"X-API-Key": tenant})
-        assert resp.status_code == 429
-        assert "Retry-After" in resp.headers
-    finally:
-        app_module._API_KEY = original_key
-        # Clean up bucket so other tests aren't affected.
-        with app_module._rate_lock:
-            app_module._rate_buckets.pop(tenant, None)
+    with _patched_api_key(rate_limited_tenant):
+        resp = client.get("/state", headers={"X-API-Key": rate_limited_tenant})
+    assert resp.status_code == 429
+    assert "Retry-After" in resp.headers
 
 
-def test_rate_limit_not_hit_with_full_bucket() -> None:
-    """A fresh (full) bucket should allow the request through."""
-    import ouroboros.api.app as app_module
-
-    tenant = "rate-ok-tenant"
-    # Ensure a full bucket.
-    with app_module._rate_lock:
-        app_module._rate_buckets[tenant] = (60.0, time.monotonic())
-
-    original_key = app_module._API_KEY
-    try:
-        app_module._API_KEY = tenant
-        resp = client.get("/state", headers={"X-API-Key": tenant})
-        assert resp.status_code == 200
-    finally:
-        app_module._API_KEY = original_key
-        with app_module._rate_lock:
-            app_module._rate_buckets.pop(tenant, None)
+def test_rate_limit_not_hit_with_full_bucket(full_bucket_tenant: str) -> None:
+    """A full rate bucket should allow the request through."""
+    with _patched_api_key(full_bucket_tenant):
+        resp = client.get("/state", headers={"X-API-Key": full_bucket_tenant})
+    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
-# WebSocket – oversized message guard
+# WebSocket – basic functionality
 # ---------------------------------------------------------------------------
 
 
 def test_ws_rejects_oversized_message() -> None:
-    """The WebSocket endpoint should close with an error for messages > 8192 bytes."""
+    """Messages exceeding WS_MESSAGE_MAX_SIZE bytes must receive an error frame."""
     with client.websocket_connect("/ws/run") as ws:
-        # Send a message that exceeds 8192 bytes.
-        oversized = json.dumps({"task": "x" * 8200})
+        oversized = json.dumps({"task": "x" * (WS_MESSAGE_MAX_SIZE + 1)})
         ws.send_text(oversized)
         data = json.loads(ws.receive_text())
         assert "error" in data
-        assert "too large" in data["error"].lower() or "8192" in data["error"]
+        assert "too large" in data["error"].lower() or str(WS_MESSAGE_MAX_SIZE) in data["error"]
 
 
 def test_ws_accepts_normal_message() -> None:
-    """A well-formed WS message within the size limit should proceed through all stages."""
+    """A well-formed WS message should produce all cognitive stage frames."""
     with client.websocket_connect("/ws/run") as ws:
         ws.send_text(json.dumps({"task": "list files"}))
-        stages: list[str] = []
-        while True:
-            msg = json.loads(ws.receive_text())
-            stages.append(msg.get("stage", ""))
-            if msg.get("stage") == "complete":
-                break
-    assert "neurosynth" in stages
-    assert "complete" in stages
+        messages = _ws_consume_stages(ws)
+    stage_names = [m.get("stage", "") for m in messages]
+    assert "neurosynth" in stage_names
+    assert "complete" in stage_names
 
 
 # ---------------------------------------------------------------------------
-# WebSocket – auth and rate-limit behaviour
+# WebSocket – authentication
 # ---------------------------------------------------------------------------
 
 
-def test_ws_rejects_missing_api_key_in_keyed_mode() -> None:
-    """In keyed mode, a WS payload without api_key must yield an unauthorized error."""
-    import ouroboros.api.app as app_module
-
-    original = app_module._API_KEY
-    try:
-        app_module._API_KEY = "test-secret-ws"
+@pytest.mark.parametrize(
+    "api_key,should_pass",
+    [
+        (None, False),          # missing api_key in payload
+        ("wrong-key", False),   # incorrect api_key
+        (TEST_API_KEY, True),   # correct api_key
+    ],
+)
+def test_ws_api_key_validation(api_key: str | None, should_pass: bool) -> None:
+    """WS auth: missing/wrong key → unauthorized frame + disconnect; correct key → stages."""
+    with _patched_api_key(TEST_API_KEY):
         with client.websocket_connect("/ws/run") as ws:
-            ws.send_text(json.dumps({"task": "do something"}))
-            data = json.loads(ws.receive_text())
-            assert "error" in data
-            assert "unauthorized" in data["error"].lower()
-            with pytest.raises(WebSocketDisconnect):
-                ws.receive_text()
-    finally:
-        app_module._API_KEY = original
+            payload: dict = {"task": "echo hello"}
+            if api_key is not None:
+                payload["api_key"] = api_key
+            ws.send_text(json.dumps(payload))
+
+            if not should_pass:
+                first = json.loads(ws.receive_text())
+                assert "error" in first
+                assert "unauthorized" in first["error"].lower()
+                with pytest.raises(WebSocketDisconnect):
+                    ws.receive_text()
+            else:
+                messages = _ws_consume_stages(ws)
+                assert all("error" not in m for m in messages), (
+                    f"Unexpected error frame: {messages}"
+                )
+                stage_names = [m.get("stage", "") for m in messages]
+                assert "neurosynth" in stage_names
+                assert "complete" in stage_names
+                final = messages[-1]
+                assert final.get("stage") == "complete"
+                assert "succeeded" in final
 
 
-def test_ws_accepts_valid_api_key_in_keyed_mode() -> None:
-    """A WS payload with the correct api_key must proceed through all stages."""
-    import ouroboros.api.app as app_module
-
-    original = app_module._API_KEY
-    try:
-        app_module._API_KEY = "test-secret-ws-ok"
-        with client.websocket_connect("/ws/run") as ws:
-            ws.send_text(json.dumps({"task": "echo hello", "api_key": "test-secret-ws-ok"}))
-            stages: list[str] = []
-            last_msg: dict = {}
-            while True:
-                msg = json.loads(ws.receive_text())
-                assert "error" not in msg, f"Unexpected error frame: {msg}"
-                stages.append(msg.get("stage", ""))
-                last_msg = msg
-                if msg.get("stage") == "complete":
-                    break
-        assert "neurosynth" in stages
-        assert "complete" in stages
-        assert last_msg.get("stage") == "complete"
-        assert "succeeded" in last_msg
-    finally:
-        app_module._API_KEY = original
+# ---------------------------------------------------------------------------
+# WebSocket – rate limiting
+# ---------------------------------------------------------------------------
 
 
-def test_ws_rate_limit_returns_error_frame() -> None:
+def test_ws_rate_limit_returns_error_frame(rate_limited_tenant: str) -> None:
     """A rate-limited tenant must receive a rate-limit error frame over WS."""
-    import ouroboros.api.app as app_module
-
-    tenant = "ws-rate-limited-tenant"
-    original_key = app_module._API_KEY
-    try:
-        app_module._API_KEY = tenant
-        # Drain the bucket so the next request is over the limit.
-        with app_module._rate_lock:
-            app_module._rate_buckets[tenant] = (0.0, time.monotonic())
-
+    with _patched_api_key(rate_limited_tenant):
         with client.websocket_connect("/ws/run") as ws:
-            ws.send_text(json.dumps({"task": "any task", "api_key": tenant}))
+            ws.send_text(json.dumps({"task": "any task", "api_key": rate_limited_tenant}))
             data = json.loads(ws.receive_text())
             assert "error" in data
             assert "rate" in data["error"].lower() or "limit" in data["error"].lower()
             assert "retry_after" in data
-    finally:
-        app_module._API_KEY = original_key
-        with app_module._rate_lock:
-            app_module._rate_buckets.pop(tenant, None)
