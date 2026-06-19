@@ -545,3 +545,28 @@ def test_compliance_pack_skills_count() -> None:
     assert len(HEALTHCARE.skills) == 2
     assert len(FINTECH.skills) == 2
     assert len(LEGAL.skills) == 2
+
+
+# Issue #13: load_into must not emit UserWarning (patterns registered before principles)
+@pytest.mark.parametrize("pack", [HEALTHCARE, FINTECH, LEGAL])
+def test_load_into_does_not_emit_pattern_warnings(pack: CompliancePack) -> None:
+    """pack.load_into() must not emit UserWarning for any principle (patterns pre-registered)."""
+    loop = _FakeLoop()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        pack.load_into(loop)
+
+
+# Issue #12: space-separated natural language route registered by register_skill
+def test_space_route_alias_resolves_compliance_skill() -> None:
+    """Intent 'hipaa check …' (spaces) must route to the 'hipaa_check' skill."""
+    loop = _loaded(HEALTHCARE)
+    result = loop.metamorph.execute(
+        ProposedAction(
+            intent="run hipaa check on patient data",
+            params={"exposes_pii": False, "audit_logged": True},
+        )
+    )
+    assert result.ok
+    assert result.skill_used == "hipaa_check"
+    assert result.synthesized is False
