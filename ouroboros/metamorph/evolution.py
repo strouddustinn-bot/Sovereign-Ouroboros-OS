@@ -196,8 +196,11 @@ class MetaMorph:
                 stacklevel=2,
             )
             return
-        self._evict_if_needed()
+        # Eviction check and registration share a single critical section so
+        # concurrent callers cannot both see the registry as under-capacity and
+        # both insert, momentarily exceeding max_registry_size.
         with self._lock:
+            self._evict_if_needed_locked()
             self.registry[name] = skill
             self._routes[name] = name
             # Natural language route: "hipaa_check" → "hipaa check" in intent.
@@ -423,23 +426,24 @@ class MetaMorph:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _evict_if_needed_locked(self) -> None:
+        """Evict the oldest entry if at capacity. Caller must hold ``_lock``."""
+        if len(self.registry) >= self.max_registry_size:
+            oldest_key = next(iter(self.registry))
+            del self.registry[oldest_key]
+            stale_routes = [k for k, v in self._routes.items() if v == oldest_key]
+            for k in stale_routes:
+                del self._routes[k]
+            warnings.warn(
+                f"MetaMorph: registry at capacity ({self.max_registry_size}); "
+                f"evicted oldest skill {oldest_key!r}.",
+                stacklevel=4,
+            )
+
     def _evict_if_needed(self) -> None:
         """Evict the oldest registry entry when the size cap is reached."""
         with self._lock:
-            if len(self.registry) >= self.max_registry_size:
-                oldest_key = next(iter(self.registry))
-                del self.registry[oldest_key]
-                # Also remove any routes pointing to this skill.
-                stale_routes = [
-                    k for k, v in self._routes.items() if v == oldest_key
-                ]
-                for k in stale_routes:
-                    del self._routes[k]
-                warnings.warn(
-                    f"MetaMorph: registry at capacity ({self.max_registry_size}); "
-                    f"evicted oldest skill {oldest_key!r}.",
-                    stacklevel=4,
-                )
+            self._evict_if_needed_locked()
 
     def _resolve(self, intent: str) -> Skill | None:
         """Return the registered skill handling *intent*, if any.

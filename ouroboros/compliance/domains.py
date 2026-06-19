@@ -17,6 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+# Default transaction limit used by both the gate predicate and the skill
+# validator.  A single constant keeps them in sync if the value ever changes.
+_DEFAULT_TRANSACTION_LIMIT: float = 10_000.0
+
 
 # ---------------------------------------------------------------------------
 # Helpers shared across predicates
@@ -96,7 +100,7 @@ def _skill_kyc_check(intent: str, params: dict[str, Any]) -> dict[str, Any]:
 def _skill_transaction_validator(intent: str, params: dict[str, Any]) -> dict[str, Any]:
     """Validate a financial transaction against configured limits."""
     amount = float(params.get("transaction_amount", 0.0))
-    limit = float(params.get("approved_limit", 10_000.0))
+    limit = float(params.get("approved_limit", _DEFAULT_TRANSACTION_LIMIT))
     confirmed = bool(params.get("confirmed", False))
     within_limit = amount <= limit
     compliant = within_limit or confirmed
@@ -253,7 +257,7 @@ def _ft_transaction_limit(action: Any) -> bool:
     if not relevant:
         return True
     amount = float(action.get("transaction_amount", 0.0))
-    limit = float(action.get("approved_limit", 10_000.0))
+    limit = float(action.get("approved_limit", _DEFAULT_TRANSACTION_LIMIT))
     return amount <= limit or bool(action.get("confirmed", False))
 
 
@@ -327,7 +331,7 @@ LEGAL = CompliancePack(
         ("jurisdiction_validator", _skill_jurisdiction_validator),
     ),
     patterns=(
-        (r"preserve attorney.client privilege", _lg_privilege),
+        (r"preserve attorney[\-.]client privilege", _lg_privilege),
         (r"never file legal documents without", _lg_filing),
         (r"never share confidential case files", _lg_confidential),
         (r"log all legal document access", _lg_audit),
