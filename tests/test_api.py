@@ -4,7 +4,6 @@ Uses FastAPI's synchronous TestClient (backed by httpx) so no asyncio event
 loop wrangling is needed.
 
 IMPORTANT – shared test state
-==============================
 All tests share the OuroborosLoop instance created at app import time.
 This means:
 - /history accumulates across tests in the same process.
@@ -261,9 +260,7 @@ def test_post_principles_adds_to_list() -> None:
     new_principles = ["Always ask before sending emails.", "Never overwrite prod data."]
     add_resp = client.post("/principles", json={"principles": new_principles})
     assert add_resp.status_code == 200
-    body = add_resp.json()
-    assert "added" in body
-    assert set(body["added"]) == set(new_principles)
+    assert add_resp.json()["added"] == new_principle
 
     names = client.get("/principles").json()
     for p in new_principles:

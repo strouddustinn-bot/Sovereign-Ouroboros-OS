@@ -18,7 +18,6 @@ logic is duplicated here.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from typing import TYPE_CHECKING, Any
@@ -56,21 +55,6 @@ CREATE TABLE IF NOT EXISTS skill_registry (
     source TEXT NOT NULL,
     synthesized INTEGER NOT NULL,
     registered_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS metering (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL DEFAULT 'default',
-    task_hash TEXT NOT NULL,
-    step INTEGER,
-    succeeded INTEGER,
-    blocked INTEGER,
-    skill_used TEXT,
-    synthesized INTEGER,
-    kb_hits INTEGER,
-    n_prototypes INTEGER,
-    timeline_score REAL,
-    ts TEXT DEFAULT (datetime('now'))
 );
 """
 
@@ -279,89 +263,6 @@ class AgentMemory:
             }
             for row in rows
         ]
-
-    # ------------------------------------------------------------------
-    # Metering
-    # ------------------------------------------------------------------
-
-    def record_usage(
-        self,
-        tenant_id: str,
-        result: "LoopResult",
-        kb_hits: int = 0,
-    ) -> None:
-        """Insert a metering row for one completed loop run.
-
-        Parameters
-        ----------
-        tenant_id:
-            The tenant identifier for multi-tenant environments.
-        result:
-            The completed :class:`~ouroboros.ouroboros_loop.LoopResult`.
-        kb_hits:
-            Number of knowledge-base hits returned during the recall stage.
-        """
-        task_hash = hashlib.sha256(result.task.encode()).hexdigest()[:16]
-        skill_used: str | None = None
-        synthesized: int | None = None
-        if result.execution is not None:
-            skill_used = result.execution.skill_used
-            synthesized = int(result.execution.synthesized)
-        timeline_score: float | None = None
-        if result.timeline is not None:
-            timeline_score = result.timeline.score
-        n_prototypes = len(result.prototypes) if result.prototypes is not None else 0
-        self._conn.execute(
-            """
-            INSERT INTO metering
-                (tenant_id, task_hash, step, succeeded, blocked, skill_used,
-                 synthesized, kb_hits, n_prototypes, timeline_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                tenant_id,
-                task_hash,
-                result.step,
-                int(result.succeeded),
-                int(result.blocked),
-                skill_used,
-                synthesized,
-                kb_hits,
-                n_prototypes,
-                timeline_score,
-            ),
-        )
-        self._conn.commit()
-
-    def get_usage_summary(self, tenant_id: str = "default") -> dict:
-        """Return aggregated usage metrics for *tenant_id*.
-
-        Returns
-        -------
-        dict with keys:
-            ``total_runs``, ``succeeded``, ``blocked``, ``unique_tasks``,
-            ``avg_score``.
-        """
-        row = self._conn.execute(
-            """
-            SELECT
-                COUNT(*)                        AS total_runs,
-                SUM(succeeded)                  AS succeeded,
-                SUM(blocked)                    AS blocked,
-                COUNT(DISTINCT task_hash)       AS unique_tasks,
-                AVG(timeline_score)             AS avg_score
-            FROM metering
-            WHERE tenant_id = ?
-            """,
-            (tenant_id,),
-        ).fetchone()
-        return {
-            "total_runs": row["total_runs"] or 0,
-            "succeeded": row["succeeded"] or 0,
-            "blocked": row["blocked"] or 0,
-            "unique_tasks": row["unique_tasks"] or 0,
-            "avg_score": row["avg_score"],
-        }
 
     # ------------------------------------------------------------------
     # Lifecycle

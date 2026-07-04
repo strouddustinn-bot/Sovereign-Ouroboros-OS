@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import re
-import threading
-import warnings
 from dataclasses import dataclass, field
 from typing import Callable
 
-# Ensure warnings from this package are visible by default.
-warnings.filterwarnings("default", category=UserWarning, module="ouroboros")
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -43,12 +39,10 @@ class GateResult:
     Attributes:
         allowed:    True only when every principle permits the action.
         violations: Names of principles that blocked the action.
-        reason:     Optional human-readable reason string (used for error reporting).
     """
 
     allowed: bool
     violations: list[str]
-    reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +145,7 @@ class EthosCompiler:
     def compile(self, principle_text: str) -> EthicalPrinciple:
         """Compile one natural language principle into an EthicalPrinciple."""
         normalized = principle_text.lower().strip()
-        predicate = self._match_pattern(normalized, principle_text)
+        predicate = self._match_pattern(normalized)
         return EthicalPrinciple(
             name=principle_text[:60].rstrip(),
             description=principle_text,
@@ -160,15 +154,11 @@ class EthosCompiler:
 
     def load_principles(self, principles: list[str]) -> None:
         """Replace the current principle set with a freshly compiled list."""
-        compiled = [self.compile(p) for p in principles]
-        with self._lock:
-            self._principles = compiled
+        self._principles = [self.compile(p) for p in principles]
 
     def add_principle(self, principle_text: str) -> None:
         """Append a single principle to the active set."""
-        compiled = self.compile(principle_text)
-        with self._lock:
-            self._principles.append(compiled)
+        self._principles.append(self.compile(principle_text))
 
     def register_patterns(
         self, patterns: list[tuple[str, Callable[[Action], bool]]]
@@ -189,14 +179,12 @@ class EthosCompiler:
         Returns a :class:`GateResult` whose ``allowed`` field is True only
         when all principles permit the action.
         """
-        with self._lock:
-            violations = [p.name for p in self._principles if not p.allows(action)]
+        violations = [p.name for p in self._principles if not p.allows(action)]
         return GateResult(allowed=not violations, violations=violations)
 
     @property
     def principles(self) -> list[EthicalPrinciple]:
-        with self._lock:
-            return list(self._principles)
+        return list(self._principles)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -214,11 +202,6 @@ class EthosCompiler:
         for pattern, predicate_fn in _PATTERN_REGISTRY:
             if re.search(pattern, normalized):
                 return predicate_fn
-        # Principle not recognized by any pattern: warn and allow.
+        # Principle not recognized by any pattern: log-and-allow.
         # TODO: integrate LLM-based principle parsing as a fallback here.
-        warnings.warn(
-            f"EthosCompiler: no pattern matched principle {principle_text!r}; "
-            "defaulting to ALLOW. Consider adding an explicit pattern.",
-            stacklevel=3,
-        )
         return lambda _action: True

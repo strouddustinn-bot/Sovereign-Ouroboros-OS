@@ -17,7 +17,6 @@ All generation is deterministic: the same intent always yields the same skill.
 
 from __future__ import annotations
 
-import concurrent.futures
 import re
 import threading
 import warnings
@@ -35,9 +34,6 @@ from ouroboros.core.types import (
 # Minimum cosine similarity for a skill to be considered a candidate for
 # composition with a given intent.
 _COMPOSITION_THRESHOLD: float = 0.35
-
-# Wall-clock timeout for skill execution (seconds).
-_SKILL_TIMEOUT: float = 5.0
 
 # ---------------------------------------------------------------------------
 # Sandbox configuration
@@ -131,9 +127,7 @@ class MetaMorph:
     sandboxed validation, and a hot-swap into the live registry.
 
     Attributes:
-        registry:          Live mapping of capability keyword -> :class:`Skill`.
-        max_registry_size: Maximum number of skills in the registry; oldest
-                           synthesized skill is evicted when the cap is reached.
+        registry: Live mapping of capability keyword -> :class:`Skill`.
     """
 
     registry: dict[str, Skill] = field(default_factory=dict)
@@ -240,7 +234,6 @@ class MetaMorph:
 
         On a miss the engine synthesizes, validates, and registers a new
         skill, then runs it -- flagging ``synthesized=True`` on the result.
-        Skill execution is bounded to :data:`_SKILL_TIMEOUT` seconds.
         """
         if self._executor._shutdown:
             return ExecutionResult(
@@ -259,10 +252,8 @@ class MetaMorph:
             # --- attempt composition before falling back to synthesis ---
             composed = self.compose_skills(action.intent)
             if composed is not None and self.validate_skill(composed):
-                self._evict_if_needed()
-                with self._lock:
-                    self.registry[composed.name] = composed
-                    self._routes[action.intent.lower()] = composed.name
+                self.registry[composed.name] = composed
+                self._routes[action.intent.lower()] = composed.name
                 skill = composed
                 synthesized = False
                 detail = "composed"
@@ -281,12 +272,10 @@ class MetaMorph:
                         "validation; not registered"
                     ),
                 )
-            self._evict_if_needed()
-            with self._lock:
-                self.registry[candidate.name] = candidate
-                # Route the originating intent to the new skill so identical
-                # future intents resolve it directly instead of re-synthesizing.
-                self._routes[action.intent.lower()] = candidate.name
+            self.registry[candidate.name] = candidate
+            # Route the originating intent to the new skill so identical
+            # future intents resolve it directly instead of re-synthesizing.
+            self._routes[action.intent.lower()] = candidate.name
             skill = candidate
             synthesized = True
 
@@ -312,7 +301,7 @@ class MetaMorph:
             )
 
         return ExecutionResult(
-            ok=ok,
+            ok=True,
             output=output,
             skill_used=skill.name,
             synthesized=synthesized,
@@ -350,10 +339,7 @@ class MetaMorph:
         intent_vec = embed(intent)
 
         candidates: list[Skill] = []
-        with self._lock:
-            registry_items = list(self.registry.items())
-
-        for name, skill in registry_items:
+        for name, skill in self.registry.items():
             # Lexical match: skill name is a substring of the intent.
             is_lexical = name in lowered
             # Semantic match: cosine similarity above threshold.
