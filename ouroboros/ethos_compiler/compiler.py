@@ -133,6 +133,10 @@ class EthosCompiler:
 
     def __init__(self) -> None:
         self._principles: list[EthicalPrinciple] = []
+        self._lock: threading.RLock = threading.RLock()
+        # Instance-level patterns checked before the global _PATTERN_REGISTRY.
+        # Compliance packs (and other extensions) append here via register_patterns().
+        self._extra_patterns: list[tuple[str, Callable[[Action], bool]]] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -156,6 +160,19 @@ class EthosCompiler:
         """Append a single principle to the active set."""
         self._principles.append(self.compile(principle_text))
 
+    def register_patterns(
+        self, patterns: list[tuple[str, Callable[[Action], bool]]]
+    ) -> None:
+        """Register additional pattern→predicate pairs for this instance.
+
+        Patterns added here are checked *before* the global ``_PATTERN_REGISTRY``
+        in :meth:`_match_pattern`, so domain-specific principle texts resolve to
+        their intended predicates without modifying the shared registry.
+        Call this before loading principles that rely on the new patterns.
+        """
+        with self._lock:
+            self._extra_patterns.extend(patterns)
+
     def gate(self, action: Action) -> GateResult:
         """Run *action* through every compiled constraint.
 
@@ -173,7 +190,15 @@ class EthosCompiler:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _match_pattern(self, normalized: str) -> Callable[[Action], bool]:
+    def _match_pattern(
+        self, normalized: str, principle_text: str = ""
+    ) -> Callable[[Action], bool]:
+        # Check instance-level patterns first (registered by compliance packs, etc.).
+        with self._lock:
+            extra = list(self._extra_patterns)
+        for pattern, predicate_fn in extra:
+            if re.search(pattern, normalized):
+                return predicate_fn
         for pattern, predicate_fn in _PATTERN_REGISTRY:
             if re.search(pattern, normalized):
                 return predicate_fn

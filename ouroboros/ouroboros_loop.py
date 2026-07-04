@@ -117,13 +117,64 @@ class OuroborosLoop:
     # The full cycle
     # ------------------------------------------------------------------
 
-    def run(self, task: str) -> LoopResult:
-        """Run one complete Recall→Imagine→Simulate→Validate→Execute→Expand cycle."""
+    def run(self, task: str, imagine_k: int | None = None) -> LoopResult:
+        """Run one complete Recall→Imagine→Simulate→Validate→Execute→Expand cycle.
+
+        Args:
+            task:      Natural language task description.
+            imagine_k: Override the instance-level ``imagine_k`` for this call
+                       only.  Does not mutate shared state, so concurrent calls
+                       with different values are safe.
+        """
+        k = imagine_k if imagine_k is not None else self.imagine_k
+        logger.info("loop.start task=%r step=%d", task, self.state.step)
+
         # 0. Recall — KnowledgeBase retrieves grounding context before imagination.
         kb_context: list[str] = []
         if self.knowledge_base is not None:
             hits = self.knowledge_base.query(task, k_rerank=3)
             kb_context = [h.chunk.content for h in hits]
+        logger.info("loop.recall hits=%d", len(kb_context))
+
+        try:
+            # 1. Imagine — NeuroSynth dreams up candidate solutions, grounded by recall.
+            prototypes = self.neurosynth.imagine(
+                task, k=k, context=kb_context
+            )
+            logger.info("loop.imagine prototypes=%d", len(prototypes))
+
+            # 2. Simulate — ChronoWeave collapses the multiverse to one path.
+            timeline = self.chronoweave.simulate(task, prototypes, self.state)
+            logger.info("loop.simulate score=%.4f", timeline.score)
+
+            # 3. Validate — EthosCompiler gates the proposed action.
+            gate = self.ethos.gate(timeline.proposed_action.as_action_dict())
+            logger.info("loop.gate allowed=%s", gate.allowed)
+            if not gate.allowed:
+                logger.warning("loop.blocked reason=%r", gate.violations)
+                result = LoopResult(
+                    task=task,
+                    prototypes=prototypes,
+                    timeline=timeline,
+                    gate=gate,
+                    execution=None,
+                    federation=None,
+                    step=self.state.step,
+                    blocked=True,
+                )
+                with self._lock:
+                    self.history.append(result)
+                if self.memory is not None:
+                    self.memory.save_result(result)
+                return result
+
+            # 4. Execute / Evolve — MetaMorph runs it, synthesizing skills on gaps.
+            execution = self.metamorph.execute(timeline.proposed_action)
+            logger.info(
+                "loop.execute skill=%r synthesized=%s",
+                execution.skill_used,
+                execution.synthesized,
+            )
 
         # 1. Imagine — NeuroSynth dreams up candidate solutions, grounded by recall.
         prototypes = self.neurosynth.imagine(

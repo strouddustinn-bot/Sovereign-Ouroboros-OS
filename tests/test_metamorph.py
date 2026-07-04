@@ -1,5 +1,9 @@
 """Tests for the MetaMorph self-modifying execution engine."""
 
+import sys
+
+import pytest
+
 from ouroboros.core import ProposedAction
 from ouroboros.metamorph import MetaMorph
 
@@ -107,3 +111,36 @@ def test_engine_satisfies_evolver_protocol():
     from ouroboros.core import Evolver
 
     assert isinstance(MetaMorph(), Evolver)
+
+
+def test_close_shuts_down_executor_and_is_idempotent():
+    engine = MetaMorph()
+    # Pool is live and usable before close.
+    result = engine.execute(ProposedAction(intent="reverse this"))
+    assert result.ok
+    engine.close()
+    assert engine._executor._shutdown is True
+    # Idempotent — a second close must not raise.
+    engine.close()
+
+
+def test_context_manager_closes_executor():
+    with MetaMorph() as engine:
+        assert engine.execute(ProposedAction(intent="reverse this")).ok
+    assert engine._executor._shutdown is True
+
+
+@pytest.mark.skipif(
+    sys.implementation.name != "cpython",
+    reason="weakref finalizer timing is CPython-specific; other implementations may not synchronously collect on gc.collect()",
+)
+def test_finalizer_shuts_down_executor_on_gc():
+    import gc
+
+    engine = MetaMorph()
+    executor = engine._executor
+    assert executor._shutdown is False
+    del engine
+    gc.collect()
+    # The weakref finalizer should have shut the pool down once unreferenced.
+    assert executor._shutdown is True

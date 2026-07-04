@@ -36,7 +36,29 @@ from ouroboros.ouroboros_loop import (
 )
 
 # ---------------------------------------------------------------------------
-# Application factory & shared state
+# Configuration
+# ---------------------------------------------------------------------------
+
+_API_KEY: str | None = os.environ.get("OUROBOROS_API_KEY") or None
+
+_raw_cors = os.environ.get("OUROBOROS_CORS_ORIGINS", "")
+if _raw_cors.strip():
+    _CORS_ORIGINS: list[str] = [o.strip() for o in _raw_cors.split(",") if o.strip()]
+else:
+    _CORS_ORIGINS = ["http://localhost:3000", "http://localhost:8080"]
+
+# Explicit dev-mode flag: set OUROBOROS_DEV_MODE=1 in local environments.
+# Using a dedicated flag (rather than inferring from API key absence) means a
+# misconfigured production deploy that forgets to set OUROBOROS_API_KEY will
+# NOT silently open CORS to "*".
+_DEV_MODE = os.getenv("OUROBOROS_DEV_MODE", "").lower() in {"1", "true", "yes"}
+_allow_origins = ["*"] if _DEV_MODE else _CORS_ORIGINS
+
+# WebSocket message size cap (bytes).  Exported so tests can stay in sync.
+WS_MAX_MESSAGE_BYTES: int = 8192
+
+# ---------------------------------------------------------------------------
+# Application factory
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
@@ -157,9 +179,28 @@ def _loop_result_summary(r: LoopResult) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/run")
-async def run_task(body: dict[str, Any]) -> dict[str, Any]:
-    """Execute one full Ouroboros cycle and return the serialised LoopResult.
+@app.get("/health")
+async def health_check() -> dict[str, str]:
+    """Liveness probe — no authentication required."""
+    return {"status": "ok", "version": "0.1.0"}
+
+
+@app.get("/metrics")
+async def metrics(tenant_id: str = Depends(_get_tenant)) -> dict[str, Any]:
+    """Return per-tenant loop metrics (auth + rate-limit required)."""
+    _check_rate_limit(tenant_id)
+    loop = _get_loop(tenant_id)
+    return {
+        "loop_step": loop.state.step,
+        "history_count": len(loop.history),
+        "skill_count": len(loop.metamorph.skills),
+        "principle_count": len(loop.ethos.principles),
+    }
+
+
+# ---------------------------------------------------------------------------
+# REST endpoints (auth + rate-limit required)
+# ---------------------------------------------------------------------------
 
     Body:
         task       (str, required)  – natural language task description
@@ -181,6 +222,26 @@ async def run_task(body: dict[str, Any]) -> dict[str, Any]:
     else:
         result = _loop.run(task)
 
+@app.post("/run")
+async def run_task(
+    body: RunRequest,
+    tenant_id: str = Depends(_get_tenant),
+) -> dict[str, Any]:
+    """Execute one full Ouroboros cycle and return the serialised LoopResult."""
+    _check_rate_limit(tenant_id)
+    loop = _get_loop(tenant_id)
+    task_hash = hashlib.sha256(body.task.encode()).hexdigest()[:16]
+    t0 = time.monotonic()
+    logger.info("api.run.start tenant=%r task_hash=%s", tenant_id, task_hash)
+    result = loop.run(body.task, imagine_k=body.imagine_k)
+    duration = time.monotonic() - t0
+    logger.info(
+        "api.run.complete tenant=%r task_hash=%s duration=%.3fs succeeded=%s",
+        tenant_id,
+        task_hash,
+        duration,
+        result.succeeded,
+    )
     return _loop_result_to_dict(result)
 
 
@@ -241,6 +302,15 @@ async def ws_run(websocket: WebSocket) -> None:
     await websocket.accept()
 
     raw = await websocket.receive_text()
+
+    # Guard: reject oversized messages.
+    if len(raw.encode("utf-8")) > WS_MAX_MESSAGE_BYTES:
+        await websocket.send_text(
+            json.dumps({"error": f"message too large (max {WS_MAX_MESSAGE_BYTES} bytes)"})
+        )
+        await websocket.close()
+        return
+
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:

@@ -18,6 +18,9 @@ All generation is deterministic: the same intent always yields the same skill.
 from __future__ import annotations
 
 import re
+import threading
+import warnings
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -129,9 +132,28 @@ class MetaMorph:
 
     registry: dict[str, Skill] = field(default_factory=dict)
     _routes: dict[str, str] = field(default_factory=dict)
+    max_registry_size: int = 256
+    _lock: threading.Lock = field(init=False, default_factory=threading.Lock)
+    _executor: concurrent.futures.ThreadPoolExecutor = field(init=False)
+    _finalizer: weakref.finalize = field(init=False)
 
     def __post_init__(self) -> None:
         """Seed the registry with the deterministic builtin skills."""
+        # Shared thread pool — reused across execute() calls to avoid the
+        # per-call overhead of creating and tearing down an Executor.
+        # Bounded (max_workers) so a tenant's runaway/hung skills can only
+        # saturate this tenant's own pool, never a global one (each
+        # OuroborosLoop builds its own MetaMorph).
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="metamorph-skill"
+        )
+        # Tear the pool down when this MetaMorph is garbage-collected so we do
+        # not leak worker threads per tenant for the process lifetime. The
+        # finalizer binds the executor's shutdown, not `self`, so it does not
+        # keep this instance alive.
+        self._finalizer = weakref.finalize(
+            self, self._executor.shutdown, wait=False, cancel_futures=True
+        )
         if not self.registry:
             for name, fn in _BUILTIN_SKILLS:
                 self.registry[name] = Skill(
@@ -146,6 +168,54 @@ class MetaMorph:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def register_skill(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        source: str = "compliance",
+    ) -> None:
+        """Register an externally provided skill by *name*.
+
+        The skill is validated via :meth:`validate_skill` before being added.
+        A warning is emitted and the skill is skipped if validation fails.
+        Also registers a space-separated route so that natural language intents
+        (e.g. ``"hipaa check"`` for skill ``"hipaa_check"``) resolve correctly.
+        """
+        skill = Skill(name=name, fn=fn, source=source, synthesized=False)
+        if not self.validate_skill(skill):
+            warnings.warn(
+                f"MetaMorph: {source} skill {name!r} failed validation; not registered.",
+                stacklevel=2,
+            )
+            return
+        # Eviction check and registration share a single critical section so
+        # concurrent callers cannot both see the registry as under-capacity and
+        # both insert, momentarily exceeding max_registry_size.
+        with self._lock:
+            self._evict_if_needed_locked()
+            self.registry[name] = skill
+            self._routes[name] = name
+            # Natural language route: "hipaa_check" → "hipaa check" in intent.
+            space_key = name.replace("_", " ")
+            if space_key != name:
+                self._routes[space_key] = name
+
+    def close(self) -> None:
+        """Shut down the skill-execution thread pool. Idempotent.
+
+        Call this when a MetaMorph (or its owning OuroborosLoop) is retired to
+        release worker threads immediately instead of waiting for GC. Running
+        the finalizer here also disarms the weakref fallback.
+        """
+        self._finalizer()
+
+    def __enter__(self) -> MetaMorph:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     @property
     def skills(self) -> list[str]:
@@ -165,6 +235,15 @@ class MetaMorph:
         On a miss the engine synthesizes, validates, and registers a new
         skill, then runs it -- flagging ``synthesized=True`` on the result.
         """
+        if self._executor._shutdown:
+            return ExecutionResult(
+                ok=False,
+                output=None,
+                skill_used="__closed__",
+                synthesized=False,
+                detail="MetaMorph executor has been shut down; call is a no-op",
+            )
+
         skill = self._resolve(action.intent)
         synthesized = False
         detail = ""
@@ -200,8 +279,18 @@ class MetaMorph:
             skill = candidate
             synthesized = True
 
+        ok = True
+        future = self._executor.submit(skill.fn, action.intent, dict(action.params))
         try:
-            output = skill.fn(action.intent, dict(action.params))
+            output = future.result(timeout=_SKILL_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            # NOTE: Python cannot forcibly kill a thread, so a timed-out skill
+            # keeps running on its worker until it returns on its own. The call
+            # still returns promptly here (result() honours the timeout); the
+            # cost is reduced pool throughput until the runaway finishes. The
+            # bounded, per-tenant pool caps the blast radius to one tenant.
+            output = {"error": "skill timed out", "intent": action.intent}
+            ok = False
         except Exception as exc:  # pragma: no cover - defensive guard
             return ExecutionResult(
                 ok=False,
@@ -322,6 +411,25 @@ class MetaMorph:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _evict_if_needed_locked(self) -> None:
+        """Evict the oldest entry if at capacity. Caller must hold ``_lock``."""
+        if len(self.registry) >= self.max_registry_size:
+            oldest_key = next(iter(self.registry))
+            del self.registry[oldest_key]
+            stale_routes = [k for k, v in self._routes.items() if v == oldest_key]
+            for k in stale_routes:
+                del self._routes[k]
+            warnings.warn(
+                f"MetaMorph: registry at capacity ({self.max_registry_size}); "
+                f"evicted oldest skill {oldest_key!r}.",
+                stacklevel=4,
+            )
+
+    def _evict_if_needed(self) -> None:
+        """Evict the oldest registry entry when the size cap is reached."""
+        with self._lock:
+            self._evict_if_needed_locked()
 
     def _resolve(self, intent: str) -> Skill | None:
         """Return the registered skill handling *intent*, if any.
